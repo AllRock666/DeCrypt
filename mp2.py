@@ -1,3 +1,6 @@
+# program without tracking/ clustering of individuals and tranformers for better optimization of the program (will be implemented later on after the study)
+
+
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest
