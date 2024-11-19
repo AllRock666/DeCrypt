@@ -1,5 +1,7 @@
 # program without tracking/ clustering of individuals and tranformers for better optimization of the program (will be implemented later on after the study)
 
+#graphs are updated with better readability and accuracy of fraud detection algorithm based on the given data
+
 
 import pandas as pd
 import numpy as np
