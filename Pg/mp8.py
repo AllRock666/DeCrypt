@@ -171,4 +171,4 @@ class BitcoinFraudDetector:
             
         return ", ".join(patterns)
 
-    # ... [rest of the class methods remain the same] ...
+    # ... continued later
