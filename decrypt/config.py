@@ -8,9 +8,34 @@ class Config:
     contamination: float = 0.1
     n_clusters: int = 10
     random_state: int = 42
+    seed: int = 42
     
     # Feature engineering parameters
     large_tx_multiplier: float = 3.0
+    link_window_hours: float = 24.0
+    link_tolerance: float = 0.02
+    min_edges: int = 10
+    legacy_features: bool = False
+    
+    # Sequence & Transformer parameters
+    no_transformer: bool = False
+    epochs: int = 20
+    min_seq_len: int = 3
+    transformer_weight: float = 0.5
+    if_weight: float = 0.5
+    
+    # Benchmark flag
+    benchmark: bool = False
+    
+    # Schema Mapping parameters
+    col_id: str = 'address_id'
+    col_amount: str = 'amount'
+    col_time: str = 'timestamp'
+    col_txid: Optional[str] = 'hash'
+    col_type: Optional[str] = 'type'
+    type_deposit: str = 'deposit'
+    type_withdraw: str = 'withdraw'
+    has_header: bool = False
     
     # Logging configuration
     log_level: int = logging.INFO
@@ -18,8 +43,9 @@ class Config:
 
 def setup_logger(name: str, config: Config) -> logging.Logger:
     logger = logging.getLogger(name)
+    logger.setLevel(config.log_level)
+    logger.propagate = False
     if not logger.handlers:
-        logger.setLevel(config.log_level)
         handler = logging.StreamHandler()
         formatter = logging.Formatter(config.log_format)
         handler.setFormatter(formatter)
