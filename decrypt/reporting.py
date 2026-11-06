@@ -193,7 +193,7 @@ def generate_pdf_report(
         "<b>DeCrypt</b> employs a multi-view anomaly detection architecture designed for financial and cryptocurrency transactions: "
         "<br/>• <b>Vectorized Behavioral Profiling:</b> Extracts net flow, pass-through ratio, Goh-Barabási burstiness, and Shannon amount entropy. "
         "<br/>• <b>Heuristic Flow Graph:</b> Traces temporal fund movements between withdrawals and matching deposits within a configurable window (24h, 2% tolerance). "
-        "<br/>• <b>BERT-Style Masked Event Transformer:</b> 2-layer Transformer encoder trained with 15% masked event modeling over direction, binned amounts, and inter-arrival intervals. Anomaly score represents leave-one-out event surprise (NLL). "
+        "<br/>• <b>BERT-Style Masked Event Transformer:</b> 2-layer Transformer encoder trained with 15% masked event modeling over direction, binned amounts, and inter-arrival intervals. Anomaly score represents leave-one-out event surprise (NLL). Detects alternating deposit/withdraw dynamics and timing transitions; note that the model does not verify fund conservation. "
         "<br/>• <b>Fusion Strategies:</b> Evaluates Mean-Rank (0.5/0.5), Max-Rank, and Tuned-Weight (0.8 IF / 0.2 TF) percentile rank fusion. "
         "<br/>• <b>Dual Clustering:</b> Evaluates KMeans on tabular features alongside HDBSCAN on PCA-reduced sequence embeddings."
     )
@@ -299,7 +299,7 @@ def generate_pdf_report(
         elements.append(Paragraph("4. Benchmark Evaluation (10 Seeds, 100 Injections/Seed, 95% Bootstrap CI)", h1_style))
         b_summary = benchmark_data['summary']
         b_rows = [
-            ['Model', 'AUROC [95% CI]', 'AP [95% CI]', 'Recall@K', 'Struct', 'Burst', 'Pass-Thru', 'Periodic', 'Spike']
+            ['Model', 'AUROC [95% CI]', 'AP [95% CI]', 'Recall@K', 'Struct', 'Burst', 'Alt Dep/Wd', 'Periodic', 'Spike']
         ]
         for m_name, vals in b_summary.items():
             b_rows.append([
@@ -356,10 +356,12 @@ def generate_pdf_report(
             elements.append(t_pair)
             elements.append(Spacer(1, 8))
             
-        # Pass-Through Delay Variants Table
+        # Alternating Deposit/Withdraw Delay Variants Table
         pt_delays = benchmark_data.get('pass_through_delay_summary', {})
         if pt_delays:
-            elements.append(Paragraph("<b>Pass-Through Recall by Delay Variant (Transformer vs Fixed IF vs Tuned Fusion)</b>", h2_style))
+            elements.append(Paragraph("<b>Alternating Deposit/Withdraw Recall by Delay Variant (Transformer vs Fixed IF vs Tuned Fusion)</b>", h2_style))
+            elements.append(Paragraph("<i>Note: The Transformer detects alternating direction/timing transitions and does not verify fund conservation.</i>", cell_style))
+            elements.append(Spacer(1, 4))
             pt_rows = [
                 ['Delay Variant', 'Transformer Recall [95% CI]', 'Fixed IF Recall [95% CI]', 'Tuned Ensemble Recall [95% CI]']
             ]

@@ -89,3 +89,33 @@ def test_prepare_numeric_features():
     assert 'num1' in clean.columns
     assert 'zero_var' not in clean.columns
     assert 'str_col' not in clean.columns
+
+def test_direction_alternation_features():
+    """
+    Test direction_switch_count, alternation_rate, and max_alternating_run_length.
+    """
+    config = Config()
+    timestamps = pd.date_range('2023-01-01', periods=5, freq='1h')
+    # addr1: [1, -1, 1, -1, 1] -> 4 switches, rate 1.0, run length 5
+    # addr2: [1, 1, -1, 1, 1]   -> switches at idx 2 (-1) and idx 3 (1): 2 switches, rate 2/4 = 0.5, max run 3
+    # addr3: [1, 1, 1, 1, 1]   -> 0 switches, rate 0.0, max run 0
+    df = pd.DataFrame({
+        'address_id': ['addr1']*5 + ['addr2']*5 + ['addr3']*5,
+        'hash': [f'tx_{i}' for i in range(15)],
+        'timestamp': list(timestamps)*3,
+        'type': [1, -1, 1, -1, 1] + [1, 1, -1, 1, 1] + [1, 1, 1, 1, 1],
+        'amount': [10.0, -10.0, 10.0, -10.0, 10.0] + [10.0, 10.0, -10.0, 10.0, 10.0] + [10.0]*5
+    })
+    feats = extract_behavioral_features(df, config)
+    
+    assert feats.loc['addr1', 'direction_switch_count'] == 4
+    assert pytest.approx(feats.loc['addr1', 'alternation_rate']) == 1.0
+    assert feats.loc['addr1', 'max_alternating_run_length'] == 5
+    
+    assert feats.loc['addr2', 'direction_switch_count'] == 2
+    assert pytest.approx(feats.loc['addr2', 'alternation_rate']) == 0.5
+    assert feats.loc['addr2', 'max_alternating_run_length'] == 3
+    
+    assert feats.loc['addr3', 'direction_switch_count'] == 0
+    assert feats.loc['addr3', 'alternation_rate'] == 0.0
+    assert feats.loc['addr3', 'max_alternating_run_length'] == 0

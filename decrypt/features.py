@@ -126,6 +126,42 @@ def extract_behavioral_features(df: pd.DataFrame, config: Config) -> pd.DataFram
     features['large_transaction_ratio'] = grouped['is_large'].mean().fillna(0.0)
     features['weekend_ratio'] = grouped['is_weekend'].mean().fillna(0.0)
     
+    # 7. Direction alternation dynamics
+    df_sorted['prev_type'] = df_sorted.groupby('address_id')['type'].shift(1)
+    df_sorted['is_switch'] = (df_sorted['prev_type'].notna() & (df_sorted['type'] != df_sorted['prev_type'])).astype(int)
+    
+    direction_switch_count = df_sorted.groupby('address_id')['is_switch'].sum()
+    features['direction_switch_count'] = direction_switch_count.reindex(features.index).fillna(0.0)
+    
+    n_txs = features['total_transactions']
+    features['alternation_rate'] = np.where(
+        n_txs > 1,
+        features['direction_switch_count'] / np.maximum(1.0, n_txs - 1.0),
+        0.0
+    )
+    
+    def calc_max_alternating_run(types):
+        if len(types) <= 1:
+            return 0
+        switches = (types[1:] != types[:-1])
+        max_run = 0
+        curr_run = 0
+        for s in switches:
+            if s:
+                curr_run += 1
+                if curr_run > max_run:
+                    max_run = curr_run
+            else:
+                curr_run = 0
+        return max_run + 1 if max_run > 0 else 0
+
+    features['max_alternating_run_length'] = (
+        df_sorted.groupby('address_id')['type']
+        .apply(lambda s: calc_max_alternating_run(s.values))
+        .reindex(features.index)
+        .fillna(0.0)
+    )
+    
     if 'hash' in df.columns:
         features['unique_interactions'] = grouped['hash'].nunique()
     else:

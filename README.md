@@ -11,6 +11,7 @@
    - Inactivity metrics via `days_until_end` relative to dataset boundaries.
    - Temporal dynamics via **Goh-Barabási burstiness** $B = \frac{\sigma - \mu}{\sigma + \mu}$, **Coefficient of Variation (CV)** of inter-event times, **lag-1 autocorrelation** of $\Delta t$, and Shannon amount entropy.
    - High-precision behavioral features: **modal-amount share** ($\frac{\text{count}(\text{mode})}{\text{total\_txs}}$) targeting automated/bot behavior.
+   - Direction transition dynamics: **`direction_switch_count`** (consecutive event pairs with opposite direction), **`alternation_rate`** ($\frac{\text{switches}}{N-1}$), and **`max_alternating_run_length`** (longest run of alternating direction transitions).
 2. **Heuristic Flow Graph (Negative Result: Excluded by Default)**:
    - Traces fund movements between withdrawals and deposits occurring within a configurable window (24h, 2% tolerance).
    - **Permutation Sanity Test & Negative Result**: Evaluated against null permutation models (20 timestamp-shuffled runs: mean 183.5 edges; 20 amount-shuffled runs: mean 154.5 edges vs. real 137 edges). Permuting timestamps and amounts yields *equal or more* edges than the real graph.
@@ -20,6 +21,7 @@
    - Generates leave-one-out event **negative log-likelihood (NLL) surprise scores**.
    - Provides per-address explainability by reporting the top-3 most surprising transactions.
    - Extracts mean-pooled sequence embeddings for non-linear density clustering via **HDBSCAN** and KMeans on the subset of entities with $\ge 3$ events.
+   - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
 4. **Ensemble Risk Fusion**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
    - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), and **Tuned Weighted Fusion** ($0.8 \times \text{rank}_{\text{IF}} + 0.2 \times \text{rank}_{\text{TF}}$, calibrated on independent tuning seeds).
@@ -28,7 +30,7 @@
    - Tabular KMeans identifies $k=2$ clusters with extreme single-cluster dominance (Cluster 1: 634 addresses / 98.1%; Cluster 0: 12 volume outliers / 1.9%), triggering an automated `>90% single cluster` diagnostic flag.
    - HDBSCAN evaluated strictly on addresses with $\ge 3$ events ($N=372$) produces 2 clusters (silhouette 0.0984, sizes: Cluster 0 with 339 entities, Cluster 1 with 7 entities, and 26 noise points). KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.4180, sizes: 187 and 185).
 6. **Synthetic Anomaly Benchmark Suite (`decrypt.benchmark`, Gen v2.0)**:
-   - Evaluates performance against 5 realistic fraud archetypes: Structuring, Bursts, Pass-Through (with delay variants: 15m, 1h, 6h, 24h), Bot-Periodic, and Dormant-Spike patterns.
+   - Evaluates performance against 5 realistic fraud archetypes: Structuring, Bursts, Alternating Deposit/Withdraw (formerly pass-through, with delay variants: 15m, 1h, 6h, 24h), Bot-Periodic, and Dormant-Spike patterns.
    - Evaluates across 10 random seeds with 20 injections per archetype (100 synthetic anomalies/seed).
    - Computes 95% bootstrap confidence intervals for all metrics as well as **paired bootstrap CIs of the difference** ($\text{Tuned Fusion} - \text{Fixed IF}$).
 7. **Multi-Page Reporting**:
@@ -100,6 +102,7 @@ Running the pipeline populates `--outdir` with:
 - `fraud_analysis_patterns.png`: Visual analytics dashboard (risk distributions, amounts, cluster sizes, heuristic flow subgraph, hourly activity).
 - `transformer_model.pt` & `transformer_bins.json`: Trained PyTorch Transformer weights and fitted quantile bin cutoffs.
 - `benchmark_results.json` & `benchmark_curves.png`: (When `--benchmark` is set) Cross-seed metrics, paired difference CIs, pass-through delay ablation, and ROC/PR curve comparisons.
+- `validation_controls.json`: Empirical results for length-control truncation, amount-perturbation invariance, in-situ contamination, and real address turnaround distributions.
 
 ---
 
@@ -111,7 +114,7 @@ Execute the automated test suite with `pytest`:
 python -m pytest tests/
 ```
 
-Test coverage includes feature correctness (e.g. deposit 100 / withdraw 100), heuristic graph linkages, sequence tensor shapes, and an end-to-end smoke test on a 50-address sample.
+Test coverage includes feature correctness (e.g. deposit 100 / withdraw 100, direction alternation dynamics), heuristic graph linkages, sequence tensor shapes, and an end-to-end smoke test on a 50-address sample.
 
 ---
 
@@ -122,3 +125,4 @@ Test coverage includes feature correctness (e.g. deposit 100 / withdraw 100), he
 3. **Short Histories Audit**: Exactly 274 addresses (42.41% of all 646 addresses) have fewer than 3 transactions (143 addresses with 1 transaction, 131 addresses with 2 transactions). These are flagged as `insufficient_history=True` and evaluated reliably via Isolation Forest without forcing sequence inference.
 4. **Empirical Temporal Patterns**: In the real dataset, **29 addresses (4.49%)** exhibit a deposit followed by a withdrawal within 15 minutes, and **61 addresses (9.44%)** have inter-event gaps under 60 seconds.
 5. **Clustering Diagnostics**: Tabular KMeans produces a cluster containing 98.14% of addresses (634/646) and an outlier cluster of 12 entities, triggering an automated cluster skew warning. HDBSCAN evaluated on the valid sequence history subset ($N=372$) yields 2 clusters (silhouette 0.0984, sizes: 339 and 7, 26 noise points), whereas KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.4180, sizes: 187 and 185).
+6. **Alternating Deposit/Withdraw Dynamics & Fund Conservation**: The Sequence Transformer achieves 1.000 recall across all delay variants for alternating deposit/withdraw patterns. With the addition of tabular direction features (`direction_switch_count`, `alternation_rate`, `max_alternating_run_length`), Fixed IF recall improves from 0.50 to 0.830 [0.760, 0.890], but does not fully match the Transformer (1.000). The model operates purely on discrete transition sequences and delta-t timings; it does *not verify fund conservation*. In validation controls (`output/validation_controls.json`), truncating sequences to 3–6 events drops Fixed IF recall to 0.200 while Transformer retains 0.910 recall. In in-situ contamination of real addresses ($\ge 5$ txs), injecting 2–3 alternating cycles yields 0.400 recall on Transformer vs 0.300–0.310 on Fixed IF.
