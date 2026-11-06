@@ -16,6 +16,7 @@ class Config:
     link_tolerance: float = 0.02
     min_edges: int = 10
     legacy_features: bool = False
+    include_network_features: bool = False
     
     # Sequence & Transformer parameters
     no_transformer: bool = False

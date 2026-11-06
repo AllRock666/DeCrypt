@@ -21,12 +21,13 @@ def main():
     
     # Analysis & Feature Flags
     parser.add_argument('--legacy-features', action='store_true', help="Use legacy flawed feature extraction baseline")
+    parser.add_argument('--include-network-features', action='store_true', help="Include heuristic network features in scoring (default: False; negative result)")
     parser.add_argument('--link-window-hours', type=float, default=24.0, help="Heuristic graph link window in hours")
     parser.add_argument('--link-tolerance', type=float, default=0.02, help="Heuristic graph amount match tolerance")
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument('--epochs', type=int, default=20, help="Training epochs for sequence transformer")
     parser.add_argument('--no-transformer', action='store_true', help="Disable sequence transformer model")
-    parser.add_argument('--benchmark', action='store_true', help="Run synthetic anomaly benchmark across 5 seeds")
+    parser.add_argument('--benchmark', action='store_true', help="Run synthetic anomaly benchmark across seeds")
     
     # Schema Mapping Arguments
     parser.add_argument('--has-header', action='store_true', help="Set this flag if the CSV has a header row")
@@ -46,6 +47,7 @@ def main():
         random_state=args.seed,
         seed=args.seed,
         legacy_features=args.legacy_features,
+        include_network_features=args.include_network_features,
         link_window_hours=args.link_window_hours,
         link_tolerance=args.link_tolerance,
         epochs=args.epochs,
@@ -96,8 +98,12 @@ def main():
             seq_detector.fit(df, outdir=outdir)
             tf_scores_df, explanations, embeddings = seq_detector.score_addresses(df)
             
-            # HDBSCAN and KMeans on Transformer sequence embeddings
-            embedding_clusters = cluster_embeddings(embeddings, [str(a) for a in features.index], config)
+            # HDBSCAN and KMeans on Transformer sequence embeddings (only for addresses with >= 3 events)
+            valid_mask = ~tf_scores_df['insufficient_history'].values
+            valid_addrs = [str(a) for a in tf_scores_df.index[valid_mask]]
+            valid_embeddings = embeddings[valid_mask]
+            
+            embedding_clusters = cluster_embeddings(valid_embeddings, valid_addrs, config)
             
             # Combine into Ensemble Risk Scores
             risk_scores_df = compute_ensemble_scores(if_scores, tf_scores_df, config)

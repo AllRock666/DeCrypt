@@ -76,6 +76,32 @@ def extract_behavioral_features(df: pd.DataFrame, config: Config) -> pd.DataFram
     features['avg_time_between_txs'] = mu.fillna(0.0)
     features['tx_time_variance'] = delta_stats['var'].fillna(0.0)
     
+    # Coefficient of Variation (CV) of inter-event times: sigma / mu (approaches 0 for bot-periodic)
+    features['cv_inter_event_time'] = np.where(mu > 0, sigma / mu, 0.0)
+    
+    # Lag-1 autocorrelation of inter-event times
+    def lag1_autocorr(sub):
+        s = sub['delta_t'].dropna()
+        if len(s) < 3:
+            return 0.0
+        v = s.var()
+        if v == 0 or np.isnan(v):
+            return 0.0
+        ac = s.autocorr(lag=1)
+        return 0.0 if np.isnan(ac) else float(ac)
+        
+    features['lag1_autocorr_inter_event_time'] = (
+        df_sorted.groupby('address_id')
+        .apply(lag1_autocorr, include_groups=False)
+        .reindex(features.index)
+        .fillna(0.0)
+    )
+    
+    # Modal-amount share (proportion of txs equaling the most common amount)
+    amt_counts = df_sorted.groupby(['address_id', 'abs_amount']).size()
+    max_amt_cnt = amt_counts.groupby('address_id').max()
+    features['modal_amount_share'] = (max_amt_cnt / features['total_transactions']).reindex(features.index).fillna(0.0)
+    
     # 5. Amount Shannon Entropy across 10 global quantile bins
     non_zero = df_sorted['abs_amount'][df_sorted['abs_amount'] > 0]
     n_unique = non_zero.nunique()
@@ -280,17 +306,23 @@ def prepare_numeric_features(features: pd.DataFrame) -> pd.DataFrame:
 def extract_all_features(df: pd.DataFrame, config: Config) -> Tuple[pd.DataFrame, nx.DiGraph]:
     """
     Coordinates extraction of all feature sets.
+    Network features are excluded by default (graph is a negative result showing no evidence above shuffled nulls),
+    and can be enabled via config.include_network_features.
     """
     if config.legacy_features:
         return extract_legacy_features(df, config)
         
     behavioral = extract_behavioral_features(df, config)
     G = build_heuristic_flow_graph(df, config)
-    network = extract_network_features(G, behavioral.index, config)
     
-    if network is not None:
-        combined = pd.concat([behavioral, network], axis=1).fillna(0.0)
+    if config.include_network_features:
+        network = extract_network_features(G, behavioral.index, config)
+        if network is not None:
+            combined = pd.concat([behavioral, network], axis=1).fillna(0.0)
+        else:
+            combined = behavioral.copy()
     else:
+        logger.info("Excluding network features from scoring by default (graph is a negative result).")
         combined = behavioral.copy()
         
     logger.info(f"Total features extracted: {combined.shape[1]}")

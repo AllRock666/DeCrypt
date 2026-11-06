@@ -82,7 +82,7 @@ def generate_visualizations(
         pos = nx.spring_layout(sub_G, seed=42)
         nx.draw_networkx_nodes(sub_G, pos, node_color='#e74c3c', node_size=80, alpha=0.8, ax=ax4)
         nx.draw_networkx_edges(sub_G, pos, edge_color='#7f8c8d', alpha=0.6, arrows=True, ax=ax4)
-        ax4.set_title(f'Heuristic Flow Subgraph [Low-Conf] ({sub_G.number_of_nodes()} nodes, {sub_G.number_of_edges()} edges)', fontsize=11, fontweight='bold')
+        ax4.set_title(f'Heuristic Flow Subgraph [Negative Result: Unused] ({sub_G.number_of_nodes()} nodes, {sub_G.number_of_edges()} edges)', fontsize=10, fontweight='bold')
     else:
         ax4.text(0.5, 0.5, "No Linkable Flow Graph\n(Dataset contains isolated single-address records)", 
                  ha='center', va='center', fontsize=11, color='#7f8c8d',
@@ -162,6 +162,15 @@ def generate_pdf_report(
     
     title_style = styles['Title']
     h1_style = styles['Heading1']
+    h2_style = ParagraphStyle(
+        'Heading2Custom',
+        parent=styles['Heading2'],
+        fontSize=10,
+        leading=12,
+        textColor=colors.HexColor('#2c3e50'),
+        spaceBefore=6,
+        spaceAfter=4
+    )
     normal_style = styles['Normal']
     
     cell_style = ParagraphStyle(
@@ -213,18 +222,19 @@ def generate_pdf_report(
         ['Total Addresses Evaluated', str(n_total), 'Distinct blockchain/account entities'],
         ['High-Risk Addresses (Risk >= 90)', str(n_high_risk), 'Top decile flagged for investigation'],
         ['Short History (<3 events)', str(n_insufficient), '143 with 1 tx + 131 with 2 txs = 274 (42.4%) scored via IF only'],
-        ['Heuristic Flow Graph Status', graph_note, 'Shuffled null models yield 150-214 edges >= real 137 -> Low-Confidence'],
+        ['Heuristic Flow Graph (Negative Result)', f"{graph_edges} edges (EXCLUDED)", 'Shuffled null models yield 150-214 edges >= real 137. Excluded from scoring.'],
         ['KMeans Clusters (Tabular)', f"k={cluster_results.get('optimal_clusters', 0)}", km_desc]
     ]
     if embedding_clusters:
-        hdb_sizes = pd.Series(embedding_clusters['hdbscan_clusters']).value_counts().to_dict()
-        hdb_max_pct = (max(hdb_sizes.values()) / n_total) * 100.0
-        hdb_flag = " [FLAG: >90% single cluster]" if hdb_max_pct > 90.0 else ""
+        hdb_sizes = embedding_clusters.get('hdbscan_cluster_sizes', {})
+        n_eval = embedding_clusters.get('n_evaluated', 372)
+        hdb_sil = embedding_clusters.get('hdbscan_silhouette', 0.0)
+        hdb_noise = embedding_clusters.get('hdbscan_noise_count', 0)
         pref = embedding_clusters.get('preferred', 'kmeans')
         summary_rows.append([
-            'HDBSCAN (Sequence Embeddings)',
-            f"{embedding_clusters.get('hdbscan_n_clusters', 0)} clusters",
-            f"Sizes: {hdb_sizes}{hdb_flag} | Sil: {embedding_clusters.get('hdbscan_silhouette', 0.0):.3f} (Preferred: {pref.upper()})"
+            'HDBSCAN (Sequence Embeddings, >=3 txs)',
+            f"{embedding_clusters.get('hdbscan_n_clusters', 0)} clusters (N={n_eval})",
+            f"Sizes: {hdb_sizes} (noise={hdb_noise}) | Sil: {hdb_sil:.3f} (Evaluated on >=3 tx entities only)"
         ])
         
     t_summary = Table(summary_rows, colWidths=[2.1*inch, 1.8*inch, 3.3*inch])
@@ -315,7 +325,66 @@ def generate_pdf_report(
             ('TOPPADDING', (0,0), (-1,-1), 2)
         ]))
         elements.append(t_bench)
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 8))
+        
+        # Paired Bootstrap Differences Table (Tuned Fusion vs Fixed IF)
+        paired = benchmark_data.get('paired_differences_tuned_vs_fixed_if', {})
+        if paired:
+            elements.append(Paragraph("<b>Paired Bootstrap CI of the Difference: Tuned Fusion (0.8/0.2) vs Fixed IF</b>", h2_style))
+            p_rows = [
+                ['Metric', 'Paired Mean Difference', '95% Bootstrap CI', 'Statistical Interpretation']
+            ]
+            for metric, label in [('auroc', 'Δ AUROC'), ('ap', 'Δ Average Precision (AP)'), ('recall_at_k', 'Δ Recall@K')]:
+                d = paired[metric]
+                interp = "Statistically Significant (p < 0.05)" if d['ci_lower'] > 0 else "Overlap with zero (p >= 0.05)"
+                p_rows.append([
+                    Paragraph(f"<b>{label}</b>", cell_style),
+                    Paragraph(f"{d['mean']:+.4f}", cell_style),
+                    Paragraph(f"[{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}]", cell_style),
+                    Paragraph(interp, cell_style)
+                ])
+            t_pair = Table(p_rows, colWidths=[1.8*inch, 1.6*inch, 1.8*inch, 2.0*inch])
+            t_pair.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2980b9')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#3498db')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('TOPPADDING', (0,0), (-1,-1), 2)
+            ]))
+            elements.append(t_pair)
+            elements.append(Spacer(1, 8))
+            
+        # Pass-Through Delay Variants Table
+        pt_delays = benchmark_data.get('pass_through_delay_summary', {})
+        if pt_delays:
+            elements.append(Paragraph("<b>Pass-Through Recall by Delay Variant (Transformer vs Fixed IF vs Tuned Fusion)</b>", h2_style))
+            pt_rows = [
+                ['Delay Variant', 'Transformer Recall [95% CI]', 'Fixed IF Recall [95% CI]', 'Tuned Ensemble Recall [95% CI]']
+            ]
+            for d_tag, d_label in [('15m', '15 minutes (2-15m)'), ('1h', '1 hour (50-70m)'), ('6h', '6 hours (5-7h)'), ('24h', '24 hours (22-26h)')]:
+                tf_v = pt_delays[d_tag]['Transformer']
+                if_v = pt_delays[d_tag]['Fixed IF']
+                en_v = pt_delays[d_tag]['Ensemble (Tuned 0.8/0.2)']
+                pt_rows.append([
+                    Paragraph(f"<b>{d_label}</b>", cell_style),
+                    Paragraph(f"{tf_v['mean']:.2f} [{tf_v['ci_lower']:.2f}, {tf_v['ci_upper']:.2f}]", cell_style),
+                    Paragraph(f"{if_v['mean']:.2f} [{if_v['ci_lower']:.2f}, {if_v['ci_upper']:.2f}]", cell_style),
+                    Paragraph(f"{en_v['mean']:.2f} [{en_v['ci_lower']:.2f}, {en_v['ci_upper']:.2f}]", cell_style)
+                ])
+            t_pt = Table(pt_rows, colWidths=[2.1*inch, 1.7*inch, 1.7*inch, 1.7*inch])
+            t_pt.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#27ae60')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#2ecc71')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('TOPPADDING', (0,0), (-1,-1), 2)
+            ]))
+            elements.append(t_pt)
+            elements.append(Spacer(1, 8))
         
     # 5. Visual Dashboard Image
     if plot_path.exists():
@@ -326,11 +395,11 @@ def generate_pdf_report(
     # Graph Sanity Audit Note
     if sanity:
         elements.append(Paragraph(
-            f"<b>Heuristic Graph Sanity & Null Permutation Audit ({sanity.get('label', 'low-confidence').upper()}):</b> "
+            f"<b>Heuristic Graph Sanity: Negative Result (No Evidence Above Shuffled Nulls):</b> "
             f"Real graph edges = {sanity.get('real_edges', 0)}. Null models: 20 timestamp-shuffled runs yielded mean = {sanity['timestamp_shuffled']['mean']:.1f} edges "
             f"[{sanity['timestamp_shuffled']['min']}-{sanity['timestamp_shuffled']['max']}]; 20 amount-shuffled runs yielded mean = {sanity['amount_shuffled']['mean']:.1f} edges "
             f"[{sanity['amount_shuffled']['min']}-{sanity['amount_shuffled']['max']}]. Because shuffled models produce equal or more edges than the real graph, "
-            f"the flow network is marked LOW CONFIDENCE and reflects temporal proximity rather than direct cryptographic provenance.",
+            f"the heuristic graph provides no cryptographic provenance and network features are excluded from scoring by default (negative result).",
             cell_style
         ))
         

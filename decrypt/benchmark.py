@@ -38,6 +38,13 @@ def compute_bootstrap_ci(data: List[float], n_boot: int = 1000, ci: float = 0.95
         'std': float(np.std(arr))
     }
 
+def compute_paired_bootstrap_ci(a: List[float], b: List[float], n_boot: int = 1000, ci: float = 0.95, seed: int = 42) -> Dict[str, float]:
+    """
+    Computes mean and 95% bootstrap confidence interval of the paired difference (a - b).
+    """
+    diffs = [float(x - y) for x, y in zip(a, b)]
+    return compute_bootstrap_ci(diffs, n_boot=n_boot, ci=ci, seed=seed)
+
 def run_graph_sanity_test(df: pd.DataFrame, config: Config, n_runs: int = 20, seed: int = 42) -> Dict[str, Any]:
     """
     Evaluates the heuristic flow graph against null permutation models:
@@ -178,10 +185,11 @@ def generate_synthetic_anomalies(
                 'amount': amt if direction == 1 else -amt
             })
 
-    # Archetype C: Pass-through / Round-trip Mixer
-    # Rapid deposit X followed shortly by withdrawal ~X
+    # Archetype C: Pass-through / Round-trip Mixer (with delay variants: 15m, 1h, 6h, 24h)
+    delay_tags = ['15m', '1h', '6h', '24h']
     for i in range(n_per_type):
-        addr = f"synth_passthrough_{i:02d}"
+        delay_tag = delay_tags[i % len(delay_tags)]
+        addr = f"synth_passthrough_{delay_tag}_{i:02d}"
         anomaly_types[addr] = "pass_through"
         n_cycles = rng.integers(6, 12)
         
@@ -198,8 +206,17 @@ def generate_synthetic_anomalies(
                 'type': 1,
                 'amount': amt
             })
-            # Rapid withdrawal minus fee
-            cur_time += pd.Timedelta(minutes=float(rng.uniform(2, 15)))
+            
+            # Withdrawal delay based on variant
+            if delay_tag == '15m':
+                cur_time += pd.Timedelta(minutes=float(rng.uniform(2, 15)))
+            elif delay_tag == '1h':
+                cur_time += pd.Timedelta(minutes=float(rng.uniform(50, 70)))
+            elif delay_tag == '6h':
+                cur_time += pd.Timedelta(hours=float(rng.uniform(5.0, 7.0)))
+            elif delay_tag == '24h':
+                cur_time += pd.Timedelta(hours=float(rng.uniform(22.0, 26.0)))
+                
             wd_amt = round(amt * rng.uniform(0.97, 0.99), 2)
             records.append({
                 'address_id': addr,
@@ -315,7 +332,7 @@ def run_single_seed_benchmark(
     if_legacy.fit(X_train_leg)
     scores_legacy = -if_legacy.score_samples(X_test_leg)
     
-    # 2. Fixed-Features IF Pipeline
+    # 2. Fixed-Features IF Pipeline (Without Network Features by default)
     train_fixed_feats, G_train = extract_all_features(train_df, config)
     test_fixed_feats, G_test = extract_all_features(test_df, config)
     
@@ -329,6 +346,25 @@ def run_single_seed_benchmark(
     if_fixed = IsolationForest(contamination=config.contamination, random_state=seed)
     if_fixed.fit(X_train_fixed)
     scores_fixed_if = -if_fixed.score_samples(X_test_fixed)
+    
+    # 2b. Fixed-Features IF WITH Network Features (for Negative Result Ablation)
+    cfg_with_net = Config(
+        include_network_features=True,
+        seed=seed,
+        contamination=config.contamination,
+        link_window_hours=config.link_window_hours,
+        link_tolerance=config.link_tolerance
+    )
+    train_wnet_feats, _ = extract_all_features(train_df, cfg_with_net)
+    test_wnet_feats, _ = extract_all_features(test_df, cfg_with_net)
+    num_train_wnet = prepare_numeric_features(train_wnet_feats)
+    num_test_wnet = prepare_numeric_features(test_wnet_feats).reindex(columns=num_train_wnet.columns).fillna(0.0)
+    scaler_wnet = StandardScaler()
+    X_train_wnet = scaler_wnet.fit_transform(num_train_wnet)
+    X_test_wnet = scaler_wnet.transform(num_test_wnet.loc[all_test_addrs])
+    if_wnet = IsolationForest(contamination=config.contamination, random_state=seed)
+    if_wnet.fit(X_train_wnet)
+    scores_fixed_if_with_net = -if_wnet.score_samples(X_test_wnet)
     
     # 3. Transformer Sequence Surprise Pipeline
     tf_detector = SequenceAnomalyDetector(config)
@@ -359,6 +395,7 @@ def run_single_seed_benchmark(
     models = {
         'Legacy IF': scores_legacy,
         'Fixed IF': scores_fixed_if,
+        'Fixed IF (with Network Features)': scores_fixed_if_with_net,
         'Transformer': scores_tf,
         'Ensemble (Mean-Rank)': scores_mean_rank,
         'Ensemble (Max-Rank)': scores_max_rank,
@@ -392,9 +429,23 @@ def run_single_seed_benchmark(
             'scores': s.tolist()
         }
         
+    # Granular pass-through delay variants recall
+    pt_delay_recalls = {}
+    for d_tag in ['15m', '1h', '6h', '24h']:
+        addrs_d = [a for a in synth_addrs if f"synth_passthrough_{d_tag}" in a]
+        n_d = len(addrs_d)
+        pt_delay_recalls[d_tag] = {}
+        for m_name in ['Fixed IF', 'Transformer', 'Ensemble (Tuned 0.8/0.2)']:
+            s = models[m_name]
+            top_k_indices = np.argsort(-s)[:k]
+            top_k_addrs = set(all_test_addrs[i] for i in top_k_indices)
+            det = len([a for a in addrs_d if a in top_k_addrs])
+            pt_delay_recalls[d_tag][m_name] = det / max(n_d, 1)
+            
     return {
         'seed': seed,
         'metrics': results,
+        'pt_delay_recalls': pt_delay_recalls,
         'y_true': y_true.tolist(),
         'n_anomalies': len(synth_addrs),
         'n_normal': len(test_real_addrs)
@@ -459,6 +510,58 @@ def run_benchmark(
             'archetype_recalls': type_agg
         }
         
+    # Paired Bootstrap Confidence Intervals of the Difference (Tuned Fusion vs Fixed IF)
+    paired_diffs = {
+        'auroc': compute_paired_bootstrap_ci(
+            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['auroc'] for r in seed_runs],
+            [r['metrics']['Fixed IF']['auroc'] for r in seed_runs]
+        ),
+        'ap': compute_paired_bootstrap_ci(
+            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['ap'] for r in seed_runs],
+            [r['metrics']['Fixed IF']['ap'] for r in seed_runs]
+        ),
+        'recall_at_k': compute_paired_bootstrap_ci(
+            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['recall_at_k'] for r in seed_runs],
+            [r['metrics']['Fixed IF']['recall_at_k'] for r in seed_runs]
+        )
+    }
+    
+    # Pass-Through Delay Variants Summary (Transformer vs Fixed IF vs Tuned Ensemble)
+    pt_delay_summary = {}
+    for d_tag in ['15m', '1h', '6h', '24h']:
+        pt_delay_summary[d_tag] = {}
+        for m_name in ['Transformer', 'Fixed IF', 'Ensemble (Tuned 0.8/0.2)']:
+            vals = [r['pt_delay_recalls'][d_tag][m_name] for r in seed_runs]
+            pt_delay_summary[d_tag][m_name] = compute_bootstrap_ci(vals, n_boot=1000, ci=0.95, seed=42)
+            
+    # Network Features Ablation (With vs Without Network Features)
+    net_ablation = {
+        'fixed_if_without_net': {
+            'auroc': compute_bootstrap_ci([r['metrics']['Fixed IF']['auroc'] for r in seed_runs]),
+            'ap': compute_bootstrap_ci([r['metrics']['Fixed IF']['ap'] for r in seed_runs]),
+            'recall_at_k': compute_bootstrap_ci([r['metrics']['Fixed IF']['recall_at_k'] for r in seed_runs])
+        },
+        'fixed_if_with_net': {
+            'auroc': compute_bootstrap_ci([r['metrics']['Fixed IF (with Network Features)']['auroc'] for r in seed_runs]),
+            'ap': compute_bootstrap_ci([r['metrics']['Fixed IF (with Network Features)']['ap'] for r in seed_runs]),
+            'recall_at_k': compute_bootstrap_ci([r['metrics']['Fixed IF (with Network Features)']['recall_at_k'] for r in seed_runs])
+        },
+        'paired_diff_with_minus_without': {
+            'auroc': compute_paired_bootstrap_ci(
+                [r['metrics']['Fixed IF (with Network Features)']['auroc'] for r in seed_runs],
+                [r['metrics']['Fixed IF']['auroc'] for r in seed_runs]
+            ),
+            'ap': compute_paired_bootstrap_ci(
+                [r['metrics']['Fixed IF (with Network Features)']['ap'] for r in seed_runs],
+                [r['metrics']['Fixed IF']['ap'] for r in seed_runs]
+            ),
+            'recall_at_k': compute_paired_bootstrap_ci(
+                [r['metrics']['Fixed IF (with Network Features)']['recall_at_k'] for r in seed_runs],
+                [r['metrics']['Fixed IF']['recall_at_k'] for r in seed_runs]
+            )
+        }
+    }
+        
     # Generate Plots from representative Seed 42
     rep_run = seed_runs[0]
     y_true_rep = np.array(rep_run['y_true'])
@@ -485,7 +588,7 @@ def run_benchmark(
         ax_pr.plot(rec, prec, label=f"{name} ({m_ap:.3f})", color=colors[name], lw=2)
         
     ax_roc.plot([0, 1], [0, 1], 'k--', lw=1.5, alpha=0.6)
-    ax_roc.set_title("ROC Curves (10 Seeds, 100 Anomalies/Seed)", fontsize=12, fontweight='bold')
+    ax_roc.set_title("ROC Curves (10 Seeds, 100 Anomalies/Seed, Gen v2.0)", fontsize=12, fontweight='bold')
     ax_roc.set_xlabel("False Positive Rate")
     ax_roc.set_ylabel("True Positive Rate")
     ax_roc.legend(loc='lower right', frameon=True, fontsize=9)
@@ -504,9 +607,13 @@ def run_benchmark(
     logger.info(f"Saved benchmark curve plots to {plot_path}")
     
     full_output = {
+        'generator_version': 'v2.0',
         'seeds': seeds,
         'n_anomalies_per_seed': n_per_type * 5,
         'summary': summary,
+        'paired_differences_tuned_vs_fixed_if': paired_diffs,
+        'pass_through_delay_summary': pt_delay_summary,
+        'network_ablation': net_ablation,
         'graph_sanity': sanity_results,
         'caveat': "Real addresses may contain true anomalies; benchmark results against synthetic archetypes are relative.",
         'plot_file': str(plot_path.name)
@@ -517,12 +624,17 @@ def run_benchmark(
         json.dump(full_output, f, indent=2)
     logger.info(f"Saved benchmark results JSON to {json_path}")
     
-    print_benchmark_markdown_table(summary)
+    print_benchmark_markdown_table(summary, paired_diffs, pt_delay_summary, net_ablation)
     return full_output
 
-def print_benchmark_markdown_table(summary: Dict[str, Any]) -> str:
+def print_benchmark_markdown_table(
+    summary: Dict[str, Any],
+    paired_diffs: Optional[Dict[str, Any]] = None,
+    pt_delays: Optional[Dict[str, Any]] = None,
+    net_ablation: Optional[Dict[str, Any]] = None
+) -> str:
     lines = []
-    lines.append("\n### Benchmark Results (10 Seeds, 20/archetype, 95% Bootstrap CI)\n")
+    lines.append("\n### Benchmark Results (10 Seeds, 20/archetype, 95% Bootstrap CI, Generator v2.0)\n")
     lines.append("| Model | AUROC [95% CI] | AP [95% CI] | Recall@K [95% CI] | Structuring | Burst | Pass-Through | Bot-Periodic | Dormant-Spike |")
     lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
     for name, m in summary.items():
@@ -538,6 +650,46 @@ def print_benchmark_markdown_table(summary: Dict[str, Any]) -> str:
         ds_s = f"{arch['dormant_spike']['mean']:.2f} [{arch['dormant_spike']['ci_lower']:.2f}, {arch['dormant_spike']['ci_upper']:.2f}]"
         
         lines.append(f"| **{name}** | {auroc_s} | {ap_s} | {rec_s} | {st_s} | {bu_s} | {pt_s} | {bp_s} | {ds_s} |")
+        
+    if paired_diffs:
+        lines.append("\n### Paired Bootstrap CIs of the Difference: Tuned Fusion (0.8/0.2) vs Fixed IF\n")
+        lines.append("| Metric | Paired Mean Difference | 95% Bootstrap CI | Interpretation |")
+        lines.append("| :--- | :---: | :---: | :--- |")
+        for metric, label in [('auroc', 'AUROC'), ('ap', 'Average Precision (AP)'), ('recall_at_k', 'Recall@K')]:
+            d = paired_diffs[metric]
+            lines.append(f"| **Δ {label}** | {d['mean']:+.4f} | [{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}] | "
+                         f"{'Statistically Significant Improvement' if d['ci_lower'] > 0 else 'Overlap with zero'} |")
+                         
+    if pt_delays:
+        lines.append("\n### Pass-Through Recall by Delay Variant (Transformer vs Fixed IF vs Tuned Fusion)\n")
+        lines.append("| Delay Variant | Transformer Recall [95% CI] | Fixed IF Recall [95% CI] | Tuned Ensemble Recall [95% CI] |")
+        lines.append("| :--- | :---: | :---: | :---: |")
+        for d_tag, d_label in [('15m', '15 minutes (2-15m)'), ('1h', '1 hour (50-70m)'), ('6h', '6 hours (5-7h)'), ('24h', '24 hours (22-26h)')]:
+            tf_v = pt_delays[d_tag]['Transformer']
+            if_v = pt_delays[d_tag]['Fixed IF']
+            en_v = pt_delays[d_tag]['Ensemble (Tuned 0.8/0.2)']
+            tf_s = f"{tf_v['mean']:.2f} [{tf_v['ci_lower']:.2f}, {tf_v['ci_upper']:.2f}]"
+            if_s = f"{if_v['mean']:.2f} [{if_v['ci_lower']:.2f}, {if_v['ci_upper']:.2f}]"
+            en_s = f"{en_v['mean']:.2f} [{en_v['ci_lower']:.2f}, {en_v['ci_upper']:.2f}]"
+            lines.append(f"| **{d_label}** | {tf_s} | {if_s} | {en_s} |")
+            
+    if net_ablation:
+        lines.append("\n### Network Feature Ablation: Fixed IF Without vs With Heuristic Flow Graph\n")
+        lines.append("| Configuration | AUROC [95% CI] | AP [95% CI] | Recall@K [95% CI] |")
+        lines.append("| :--- | :---: | :---: | :---: |")
+        w_out = net_ablation['fixed_if_without_net']
+        w_in = net_ablation['fixed_if_with_net']
+        diff = net_ablation['paired_diff_with_minus_without']
+        lines.append(f"| **Without Network Features (Default)** | {w_out['auroc']['mean']:.3f} [{w_out['auroc']['ci_lower']:.3f}, {w_out['auroc']['ci_upper']:.3f}] | "
+                     f"{w_out['ap']['mean']:.3f} [{w_out['ap']['ci_lower']:.3f}, {w_out['ap']['ci_upper']:.3f}] | "
+                     f"{w_out['recall_at_k']['mean']:.3f} [{w_out['recall_at_k']['ci_lower']:.3f}, {w_out['recall_at_k']['ci_upper']:.3f}] |")
+        lines.append(f"| **With Network Features (Ablation)** | {w_in['auroc']['mean']:.3f} [{w_in['auroc']['ci_lower']:.3f}, {w_in['auroc']['ci_upper']:.3f}] | "
+                     f"{w_in['ap']['mean']:.3f} [{w_in['ap']['ci_lower']:.3f}, {w_in['ap']['ci_upper']:.3f}] | "
+                     f"{w_in['recall_at_k']['mean']:.3f} [{w_in['recall_at_k']['ci_lower']:.3f}, {w_in['recall_at_k']['ci_upper']:.3f}] |")
+        lines.append(f"| **Paired Difference (With - Without)** | {diff['auroc']['mean']:+.4f} [{diff['auroc']['ci_lower']:+.4f}, {diff['auroc']['ci_upper']:+.4f}] | "
+                     f"{diff['ap']['mean']:+.4f} [{diff['ap']['ci_lower']:+.4f}, {diff['ap']['ci_upper']:+.4f}] | "
+                     f"{diff['recall_at_k']['mean']:+.4f} [{diff['recall_at_k']['ci_lower']:+.4f}, {diff['recall_at_k']['ci_upper']:+.4f}] |")
+                     
     table_str = "\n".join(lines)
     logger.info(table_str)
     return table_str

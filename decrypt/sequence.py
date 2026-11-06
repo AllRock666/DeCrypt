@@ -603,19 +603,29 @@ def cluster_embeddings(embeddings: np.ndarray, addresses: List[str], config: Con
     km_labels = final_km.fit_predict(X_pca)
     
     preferred = 'hdbscan' if (hdb_sil > best_km_sil and n_hdb_clusters >= 2) else 'kmeans'
+    unique_hdb, counts_hdb = np.unique(hdb_labels, return_counts=True)
+    hdb_sizes = {int(k): int(v) for k, v in zip(unique_hdb, counts_hdb)}
+    
+    unique_km, counts_km = np.unique(km_labels, return_counts=True)
+    km_sizes = {int(k): int(v) for k, v in zip(unique_km, counts_km)}
+    
     logger.info(
-        f"Embedding Clustering: HDBSCAN clusters={n_hdb_clusters} (sil={hdb_sil:.4f}, noise={np.sum(~non_noise_mask)}) | "
-        f"KMeans k={best_k} (sil={best_km_sil:.4f}) | Preferred: {preferred}"
+        f"Embedding Clustering (on {len(addresses)} addresses with >=3 events): "
+        f"HDBSCAN clusters={n_hdb_clusters} (sil={hdb_sil:.4f}, noise={np.sum(~non_noise_mask)}, sizes={hdb_sizes}) | "
+        f"KMeans k={best_k} (sil={best_km_sil:.4f}, sizes={km_sizes}) | Preferred: {preferred}"
     )
     
     return {
         'hdbscan_clusters': dict(zip(addresses, [int(l) for l in hdb_labels])),
         'kmeans_clusters': dict(zip(addresses, [int(l) for l in km_labels])),
+        'hdbscan_cluster_sizes': hdb_sizes,
+        'kmeans_cluster_sizes': km_sizes,
         'hdbscan_silhouette': hdb_sil,
         'kmeans_silhouette': float(best_km_sil),
         'hdbscan_n_clusters': n_hdb_clusters,
         'kmeans_k': best_k,
         'hdbscan_noise_count': int(np.sum(~non_noise_mask)),
+        'n_evaluated': len(addresses),
         'preferred': preferred
     }
 
