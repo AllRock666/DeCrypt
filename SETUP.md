@@ -73,6 +73,7 @@ DATABASE_URL=sqlite:///./decrypt_storage.db
 SERVICE_HOST=0.0.0.0
 SERVICE_PORT=8000
 RATE_LIMIT_PER_MINUTE=600
+DECRYPT_API_KEY=decrypt-dev-key
 
 # Banking (Plaid Sandbox)
 PLAID_CLIENT_ID=your_sandbox_client_id_here
@@ -132,7 +133,40 @@ Interactive OpenAPI documentation is available in your browser at:
 
 ---
 
-## 5. Running the Test Suite
+## 5. API Authentication Reference
+
+The service enforces API authentication across protected ingest and risk evaluation endpoints:
+
+| Endpoint | Method | Authentication Required? | Mechanism / Header |
+| :--- | :---: | :---: | :--- |
+| `/transactions/ingest` | `POST` | **Yes** | `X-API-Key: <key>` or `Authorization: Bearer <key>` (`DECRYPT_API_KEY`) |
+| `/risk/{entity_id}` | `GET` | **Yes** | `X-API-Key: <key>` or `Authorization: Bearer <key>` (`DECRYPT_API_KEY`) |
+| `/risk` | `GET` | **Yes** | `X-API-Key: <key>` or `Authorization: Bearer <key>` (`DECRYPT_API_KEY`) |
+| `/webhooks/alchemy` | `POST` | **Yes** | `X-Alchemy-Signature: <hex_hmac>` (`ALCHEMY_WEBHOOK_SIGNING_KEY`) |
+| `/webhooks/plaid` | `POST` | **Yes** | `X-Plaid-Webhook-Secret` or `Plaid-Verification` |
+| `/transactions` | `GET` | No | Public read query (rate-limited to 600 req/min) |
+| `/transactions/{id}` | `GET` | No | Public read query (rate-limited to 600 req/min) |
+| `/health` | `GET` | No | Unauthenticated health/readiness probe |
+| `/metrics` | `GET` | No | Unauthenticated operational telemetry |
+
+---
+
+## 6. Provider Testing: Fixtures vs. Live Calls
+
+To ensure fast, deterministic, and credential-free CI/CD execution, test suites are strictly partitioned:
+
+| Test Module / Suite | Execution Mode | Fixtures vs. Live Calls | External Credentials Required? |
+| :--- | :---: | :--- | :---: |
+| `tests/test_domain_schema.py` | Unit | **Hermetic Fixtures**: Tests Decimal precision, UTC parsing, and legacy CSV mapping using local objects. | None |
+| `tests/test_providers.py` | Unit | **Hermetic Fixtures**: Mocks Plaid JSON payloads (verifying deposit/withdrawal inversion), Alchemy EVM transfer events (verifying ERC-20 contract resolution), and Bitcoin Esplora UTXO structures (verifying net spent/received Satoshis). | None |
+| `tests/test_service_api.py` | Integration | **TestClient In-Memory Fixtures**: Tests FastAPI endpoints, sliding-window rate limiting, and HMAC webhook verification using mock payloads. | None |
+| `tests/test_feature_parity.py` | Parity | **Local Dataset Fixture**: Tests exact parity between batch and incremental feature extractors across 20 real entities using local `data/bitcoin_transactions.csv`. | None |
+| `tests/test_source_guard.py` | Unit | **Hermetic Fixtures**: Tests model training domain restriction (Bitcoin/BTC) and uncalibrated source rejection using synthetic in-memory transaction lists. | None |
+| **Live Provider Adapter Calls** | Optional Runtime | **Live External Calls**: Invoked only when executing live synchronization scripts or when `PLAID_CLIENT_ID`, `ALCHEMY_API_KEY`, or `ESPLORA_API_URL` are provided in `.env`. | Required for live network sync |
+
+---
+
+## 7. Running the Test Suite
 
 Execute the comprehensive test suite spanning schema validation, provider adapters, incremental ML scoring, storage, and API endpoints:
 
@@ -140,11 +174,11 @@ Execute the comprehensive test suite spanning schema validation, provider adapte
 python -m pytest tests/ -v
 ```
 
-All 24 test suites should pass green.
+All 26 test suites should pass green.
 
 ---
 
-## 6. Running Offline Batch Processing & Benchmarks
+## 8. Running Offline Batch Processing & Benchmarks
 
 DeCrypt retains 100% backward compatibility with offline forensic batch datasets:
 
@@ -166,7 +200,7 @@ Outputs will be generated in `./output`:
 
 ---
 
-## 7. Connecting External Providers
+## 9. Connecting External Providers
 
 ### 7.1 Plaid Sandbox
 1. Register for free at [dashboard.plaid.com/signup](https://dashboard.plaid.com/signup).

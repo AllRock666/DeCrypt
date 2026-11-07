@@ -6,7 +6,7 @@ to O(W) feature computation for real-time streaming without requiring global
 DataFrame groupby aggregations over the entire historical database.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Sequence
 from decimal import Decimal
 from datetime import datetime, timezone
 import numpy as np
@@ -20,7 +20,7 @@ class EntityStateManager:
     In-memory / cache manager tracking entity transaction history windows.
     """
 
-    def __init__(self, max_history_per_entity: int = 128):
+    def __init__(self, max_history_per_entity: Optional[int] = None):
         self.max_history = max_history_per_entity
         # Map: entity_id -> list of UnifiedTransaction sorted by timestamp
         self._entity_histories: Dict[str, List[UnifiedTransaction]] = {}
@@ -30,7 +30,8 @@ class EntityStateManager:
 
     def add_transaction(self, tx: UnifiedTransaction) -> List[UnifiedTransaction]:
         """
-        Appends transaction to entity history, maintaining chronological order and bounded length.
+        Appends transaction to entity history, maintaining chronological order.
+        If max_history is set, enforces bounded length.
         """
         history = self._entity_histories.setdefault(tx.entity_id, [])
         # Insert maintaining time order
@@ -41,8 +42,8 @@ class EntityStateManager:
             history.append(tx)
             history.sort(key=lambda t: t.timestamp)
 
-        # Enforce bounded window
-        if len(history) > self.max_history:
+        # Enforce bounded window if specified
+        if self.max_history and len(history) > self.max_history:
             self._entity_histories[tx.entity_id] = history[-self.max_history:]
 
         return self._entity_histories[tx.entity_id]
@@ -50,7 +51,10 @@ class EntityStateManager:
     def load_entity_history(self, entity_id: str, transactions: List[UnifiedTransaction]):
         """Populates history from persistent storage."""
         sorted_txs = sorted(transactions, key=lambda t: t.timestamp)
-        self._entity_histories[entity_id] = sorted_txs[-self.max_history:]
+        if self.max_history:
+            self._entity_histories[entity_id] = sorted_txs[-self.max_history:]
+        else:
+            self._entity_histories[entity_id] = sorted_txs
 
     def clear(self):
         self._entity_histories.clear()
@@ -62,8 +66,24 @@ class IncrementalFeatureExtractor:
     Strictly aligns with `decrypt.features.extract_behavioral_features`.
     """
 
-    def __init__(self, global_max_time: Optional[datetime] = None, large_tx_multiplier: float = 3.0):
-        self.global_max_time = global_max_time or datetime.now(timezone.utc)
+    def __init__(
+        self,
+        global_min_time: Optional[datetime] = None,
+        global_max_time: Optional[datetime] = None,
+        amount_bins: Optional[Sequence[float]] = None,
+        large_tx_multiplier: float = 3.0
+    ):
+        def _to_utc(dt):
+            if dt is None:
+                return None
+            pdt = pd.to_datetime(dt)
+            if pdt.tzinfo is None:
+                return pdt.tz_localize(timezone.utc)
+            return pdt.tz_convert(timezone.utc)
+
+        self.global_min_time = _to_utc(global_min_time)
+        self.global_max_time = _to_utc(global_max_time) or datetime.now(timezone.utc)
+        self.amount_bins = list(amount_bins) if amount_bins is not None else None
         self.large_tx_multiplier = large_tx_multiplier
 
     def compute_features(self, history: List[UnifiedTransaction]) -> Dict[str, float]:
@@ -107,8 +127,15 @@ class IncrementalFeatureExtractor:
         first_tx = timestamps[0]
         last_tx = timestamps[-1]
         activity_period_days = max(0.0, (last_tx - first_tx).total_seconds() / 86400.0)
-        days_since_first = max(0.0, (first_tx - first_tx).total_seconds() / 86400.0)
-        days_until_end = max(0.0, (self.global_max_time - last_tx).total_seconds() / 86400.0)
+        if self.global_min_time is not None:
+            days_since_first = (first_tx - self.global_min_time).total_seconds() / 86400.0
+        else:
+            days_since_first = 0.0
+
+        if self.global_max_time is not None:
+            days_until_end = (self.global_max_time - last_tx).total_seconds() / 86400.0
+        else:
+            days_until_end = 0.0
 
         # 4. Temporal dynamics & Burstiness
         if n_txs > 1:
@@ -135,13 +162,18 @@ class IncrementalFeatureExtractor:
             cv_inter_event_time = 0.0
             lag1_autocorr = 0.0
 
-        # 5. Modal-Amount Share
-        round_amounts = np.round(abs_amounts, 4)
-        vals, counts = np.unique(round_amounts, return_counts=True)
+        # 5. Modal-Amount Share (unrounded exact match to batch)
+        vals, counts = np.unique(abs_amounts, return_counts=True)
         modal_amount_share = float(np.max(counts) / n_txs) if len(counts) > 0 else 0.0
 
-        # 6. Amount Entropy (over fixed quantile proxy bins)
-        if len(vals) > 1:
+        # 6. Amount Entropy (over fixed quantile bins if provided, else unique vals)
+        if self.amount_bins is not None and len(self.amount_bins) > 1:
+            binned = pd.cut(abs_amounts, bins=self.amount_bins, labels=False, include_lowest=True)
+            bin_counts = pd.Series(binned).value_counts()
+            probs = bin_counts / bin_counts.sum()
+            log2_p = np.where(probs > 0, np.log2(probs), 0.0)
+            amount_entropy = -float(np.sum(probs * log2_p))
+        elif len(vals) > 1:
             probs = counts / counts.sum()
             with np.errstate(divide='ignore'):
                 log2_p = np.where(probs > 0, np.log2(probs), 0.0)

@@ -38,6 +38,29 @@ def test_health_and_metrics_endpoints(client):
 
 import uuid
 
+AUTH_HEADERS = {"X-API-Key": "decrypt-dev-key"}
+
+
+def test_auth_enforcement_on_protected_endpoints(client):
+    """Verify that /transactions/ingest, /risk/{id}, and /risk return 401 when API key is missing or invalid."""
+    # 1. Ingest without auth
+    r_no_auth = client.post("/transactions/ingest", json={"transaction": {}})
+    assert r_no_auth.status_code == 401
+    assert "Invalid or missing API key" in r_no_auth.json()["detail"]
+
+    # 2. Ingest with invalid auth
+    r_bad_auth = client.post("/transactions/ingest", json={"transaction": {}}, headers={"X-API-Key": "wrong-secret"})
+    assert r_bad_auth.status_code == 401
+
+    # 3. Risk query without auth
+    r_risk_no_auth = client.get("/risk/user_123")
+    assert r_risk_no_auth.status_code == 401
+
+    # 4. High-risk list without auth
+    r_list_no_auth = client.get("/risk")
+    assert r_list_no_auth.status_code == 401
+
+
 def test_transaction_ingest_and_query_flow(client):
     """Test full cycle: ingest transaction -> query transaction -> score entity."""
     test_uid = uuid.uuid4().hex[:8]
@@ -46,40 +69,40 @@ def test_transaction_ingest_and_query_flow(client):
 
     canonical_tx = {
         "transaction_id": test_tx_id,
-        "source": "banking_plaid",
-        "network": "fiat_banking",
+        "source": "crypto_bitcoin",
+        "network": "bitcoin",
         "entity_id": test_entity_id,
         "transaction_hash": f"bank_ref_{test_uid}",
         "timestamp": "2026-11-06T12:00:00Z",
         "transaction_type": "deposit",
         "amount": "1500.50",
-        "asset": "USD",
+        "asset": "BTC",
         "counterparty": "Employer Direct Deposit",
         "status": "confirmed",
         "metadata": {"test": True}
     }
 
-    # 1. Ingest
-    r_ingest = client.post("/transactions/ingest", json={"transaction": canonical_tx})
+    # 1. Ingest with valid auth
+    r_ingest = client.post("/transactions/ingest", json={"transaction": canonical_tx}, headers=AUTH_HEADERS)
     assert r_ingest.status_code == 200
     ing_data = r_ingest.json()
     assert ing_data["transaction_id"] == test_tx_id
     assert ing_data["is_duplicate"] is False
 
     # 2. Duplicate detection
-    r_dup = client.post("/transactions/ingest", json={"transaction": canonical_tx})
+    r_dup = client.post("/transactions/ingest", json={"transaction": canonical_tx}, headers=AUTH_HEADERS)
     assert r_dup.status_code == 200
     assert r_dup.json()["is_duplicate"] is True
 
-    # 3. Query transaction by ID
+    # 3. Query transaction by ID (public query endpoint)
     r_get = client.get(f"/transactions/{test_tx_id}")
     assert r_get.status_code == 200
     tx_res = r_get.json()
     assert tx_res["entity_id"] == test_entity_id
     assert float(tx_res["amount"]) == 1500.50
 
-    # 4. Query entity risk
-    r_risk = client.get(f"/risk/{test_entity_id}")
+    # 4. Query entity risk with valid auth
+    r_risk = client.get(f"/risk/{test_entity_id}", headers=AUTH_HEADERS)
     assert r_risk.status_code == 200
     risk_data = r_risk.json()
     assert "ensemble_risk_score" in risk_data

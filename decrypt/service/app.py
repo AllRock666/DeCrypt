@@ -29,7 +29,7 @@ from decrypt.pipeline.incremental import EntityStateManager
 from decrypt.pipeline.realtime_scorer import RealTimeScorer
 from decrypt.providers.plaid_adapter import PlaidAdapter
 from decrypt.providers.alchemy_adapter import AlchemyAdapter
-from decrypt.security.verification import verify_alchemy_signature, verify_plaid_webhook
+from decrypt.security.verification import verify_alchemy_signature, verify_plaid_webhook, verify_api_key
 from decrypt.security.redaction import redact_sensitive_dict
 from .metrics import metrics
 
@@ -37,7 +37,7 @@ logger = logging.getLogger("decrypt.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 # Global in-memory managers
-state_manager = EntityStateManager(max_history_per_entity=128)
+state_manager = EntityStateManager(max_history_per_entity=None)
 scorer: Optional[RealTimeScorer] = None
 plaid_adapter = PlaidAdapter(
     client_id=os.getenv("PLAID_CLIENT_ID"),
@@ -130,27 +130,29 @@ def process_entity_scoring(entity_id: str, db: Session):
         latency_ms = (time.time() - t0) * 1000.0
         metrics.record_inference_latency(latency_ms)
 
-        if score_res["ensemble_risk_score"] >= 90.0:
+        ens_score = score_res.get("ensemble_risk_score")
+        if ens_score is not None and ens_score >= 90.0:
             metrics.record_high_risk_alert()
 
-        repo.save_risk_score(
-            entity_id=entity_id,
-            if_score=score_res["if_risk_score"],
-            tf_surprise=score_res["transformer_surprise"],
-            ensemble_risk_score=score_res["ensemble_risk_score"],
-            percentile_rank=score_res["percentile_rank"],
-            insufficient_history=score_res["insufficient_history"],
-            top_features=score_res.get("top_features"),
-            top_events=score_res.get("top_events"),
-            explanation=score_res.get("explanation")
-        )
+        if ens_score is not None:
+            repo.save_risk_score(
+                entity_id=entity_id,
+                if_score=score_res["if_risk_score"],
+                tf_surprise=score_res["transformer_surprise"],
+                ensemble_risk_score=score_res["ensemble_risk_score"],
+                percentile_rank=score_res["percentile_rank"],
+                insufficient_history=score_res["insufficient_history"],
+                top_features=score_res.get("top_features"),
+                top_events=score_res.get("top_events"),
+                explanation=score_res.get("explanation")
+            )
 
 
 # =====================================================================
 # Endpoints
 # =====================================================================
 
-@app.post("/transactions/ingest", response_model=IngestResponse, dependencies=[Depends(check_rate_limit)])
+@app.post("/transactions/ingest", response_model=IngestResponse, dependencies=[Depends(check_rate_limit), Depends(verify_api_key)])
 async def ingest_transaction(
     payload: IngestRequest,
     background_tasks: BackgroundTasks,
@@ -236,7 +238,7 @@ def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
     return tx
 
 
-@app.get("/risk/{entity_id}", dependencies=[Depends(check_rate_limit)])
+@app.get("/risk/{entity_id}", dependencies=[Depends(check_rate_limit), Depends(verify_api_key)])
 def get_entity_risk(entity_id: str, db: Session = Depends(get_db)):
     """
     Computes or retrieves real-time multi-view anomaly score and explainability narrative.
@@ -244,7 +246,7 @@ def get_entity_risk(entity_id: str, db: Session = Depends(get_db)):
     repo = TransactionRepository(db)
     history = state_manager.get_history(entity_id)
     if not history:
-        history = repo.get_entity_transactions(entity_id, limit=128)
+        history = repo.get_entity_transactions(entity_id)
         state_manager.load_entity_history(entity_id, history)
 
     if not history:
@@ -256,7 +258,7 @@ def get_entity_risk(entity_id: str, db: Session = Depends(get_db)):
     return scorer.score_entity(entity_id, history)
 
 
-@app.get("/risk", dependencies=[Depends(check_rate_limit)])
+@app.get("/risk", dependencies=[Depends(check_rate_limit), Depends(verify_api_key)])
 def list_high_risk_entities(
     threshold: float = 90.0,
     limit: int = 50,

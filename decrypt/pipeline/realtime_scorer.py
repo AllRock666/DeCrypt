@@ -49,6 +49,12 @@ class RealTimeScorer:
         self.if_reference_scores: np.ndarray = np.array([])
         self.tf_reference_surprises: np.ndarray = np.array([])
 
+        # Training domain & source guard configuration
+        self.training_domain: str = "crypto_bitcoin"
+        self.training_asset: str = "BTC"
+        self.model_version: str = "v2.0-realtime-ensemble"
+        self.per_source_calibration: Dict[str, Dict[str, np.ndarray]] = {}
+
         # Sequence Transformer components
         self.tf_model: Optional[EventTransformerModel] = None
         self.amount_bins: np.ndarray = np.array([])
@@ -56,6 +62,31 @@ class RealTimeScorer:
         self.device = torch.device("cpu")
 
         self._load_or_initialize_models()
+
+    def register_source_calibration(
+        self,
+        source: str,
+        if_reference_scores: np.ndarray,
+        tf_reference_surprises: np.ndarray
+    ):
+        """
+        Registers an empirical reference distribution calibrated for an alternative source.
+        """
+        src = str(source).lower().replace("transactionsource.", "")
+        self.per_source_calibration[src] = {
+            "if_ref": np.sort(np.asarray(if_reference_scores)),
+            "tf_ref": np.sort(np.asarray(tf_reference_surprises))
+        }
+        logger.info(f"Registered fitted calibration reference distribution for source: {src}")
+
+    def is_source_calibrated(self, source: str) -> bool:
+        """
+        Returns True if the source matches the model's training domain or has a fitted reference distribution.
+        """
+        src = str(source).lower().replace("transactionsource.", "")
+        if src in [self.training_domain, "crypto_bitcoin", "csv_import", "internal"]:
+            return True
+        return src in self.per_source_calibration
 
     def _load_or_initialize_models(self):
         """
@@ -101,6 +132,29 @@ class RealTimeScorer:
             except Exception as e:
                 logger.warning(f"Could not load reference scores ({e}).")
 
+        # 3. Model metadata domain tracking
+        metadata_path = self.model_dir / "model_metadata.json"
+        if metadata_path.exists():
+            try:
+                with open(metadata_path, "r") as f:
+                    meta = json.load(f)
+                    self.training_domain = meta.get("training_domain", self.training_domain)
+                    self.training_asset = meta.get("training_asset", self.training_asset)
+            except Exception as e:
+                logger.warning(f"Could not load model metadata: {e}")
+        else:
+            try:
+                self.model_dir.mkdir(parents=True, exist_ok=True)
+                with open(metadata_path, "w") as f:
+                    json.dump({
+                        "training_domain": self.training_domain,
+                        "training_asset": self.training_asset,
+                        "model_version": self.model_version,
+                        "calibrated_sources": [self.training_domain, "csv_import", "internal"]
+                    }, f, indent=2)
+            except Exception as e:
+                logger.debug(f"Could not persist model metadata: {e}")
+
     def fit_baseline_from_dataframe(self, df: pd.DataFrame):
         """
         Fits tabular Scaler and Isolation Forest on an empirical baseline dataset.
@@ -145,6 +199,7 @@ class RealTimeScorer:
         if not history:
             return {
                 "entity_id": entity_id,
+                "status": "empty_history",
                 "ensemble_risk_score": 0.0,
                 "if_risk_score": 0.0,
                 "transformer_surprise": 0.0,
@@ -155,6 +210,38 @@ class RealTimeScorer:
                 "explanation": "No transaction history recorded.",
                 "disclaimer": "Anomaly scores represent statistical deviation and do not constitute verified fraud."
             }
+
+        # Source Guard: ensure transaction source matches calibrated domain
+        primary_tx = history[-1]
+        primary_source = primary_tx.source.value if hasattr(primary_tx.source, "value") else str(primary_tx.source)
+        if not self.is_source_calibrated(primary_source):
+            return {
+                "entity_id": entity_id,
+                "status": "not calibrated for this source",
+                "source": primary_source,
+                "training_domain": self.training_domain,
+                "ensemble_risk_score": None,
+                "if_risk_score": None,
+                "transformer_surprise": None,
+                "percentile_rank": None,
+                "insufficient_history": True,
+                "top_features": [],
+                "top_events": [],
+                "explanation": (
+                    f"Model artifact was trained and calibrated on {self.training_domain} ({self.training_asset}). "
+                    f"Transactions from source '{primary_source}' require a fitted per-source reference distribution before scoring."
+                ),
+                "model_version": self.model_version,
+                "disclaimer": "Uncalibrated source: domain-specific reference distribution required before anomaly scoring."
+            }
+
+        src_key = str(primary_source).lower().replace("transactionsource.", "")
+        if src_key in self.per_source_calibration:
+            active_if_ref = self.per_source_calibration[src_key]["if_ref"]
+            active_tf_ref = self.per_source_calibration[src_key]["tf_ref"]
+        else:
+            active_if_ref = self.if_reference_scores
+            active_tf_ref = self.tf_reference_surprises
 
         n_events = len(history)
 
@@ -171,7 +258,7 @@ class RealTimeScorer:
             feat_vec = np.array([raw_feat_dict.get(col, 0.0) for col in self.feature_names], dtype=np.float64).reshape(1, -1)
             scaled_vec = self.scaler.transform(feat_vec)
             if_raw = float(-self.if_model.score_samples(scaled_vec)[0])
-            if_pct = self.calibrate_percentile(if_raw, self.if_reference_scores)
+            if_pct = self.calibrate_percentile(if_raw, active_if_ref)
 
             # Feature Attribution (SHAP-style deviation from mean)
             deviations = np.abs(scaled_vec[0])
@@ -195,7 +282,7 @@ class RealTimeScorer:
         else:
             insufficient_history = False
             tf_surprise, top_events = self._compute_sequence_surprise(history)
-            tf_pct = self.calibrate_percentile(tf_surprise, self.tf_reference_surprises)
+            tf_pct = self.calibrate_percentile(tf_surprise, active_tf_ref)
             # Tuned Weighted Ensemble: 0.8 * IF + 0.2 * TF
             ensemble_score = float(self.w_if * if_pct + self.w_tf * tf_pct)
 
@@ -214,6 +301,7 @@ class RealTimeScorer:
 
         return {
             "entity_id": entity_id,
+            "status": "success",
             "seq_length": n_events,
             "ensemble_risk_score": round(ensemble_score, 2),
             "if_risk_score": round(if_pct, 2),
@@ -223,7 +311,7 @@ class RealTimeScorer:
             "top_features": top_features,
             "top_events": top_events,
             "explanation": explanation,
-            "model_version": "v2.0-realtime-ensemble",
+            "model_version": self.model_version,
             "disclaimer": "Statistical Anomaly Detection Notice: High risk scores indicate rare or extreme behavioral deviations from population baselines and warrant compliance triage; they do not constitute legal or confirmed classification of fraud."
         }
 

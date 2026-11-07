@@ -1,10 +1,46 @@
 """
-Cryptographic Webhook Signature Verification for DeCrypt.
+Cryptographic Webhook Signature Verification and API Authentication for DeCrypt.
 """
 
+import os
 import hmac
 import hashlib
 from typing import Dict, Optional
+from fastapi import Header, HTTPException, Security
+from fastapi.security import APIKeyHeader
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def verify_api_key(
+    x_api_key: Optional[str] = Security(api_key_header),
+    authorization: Optional[str] = Header(None)
+) -> str:
+    """
+    Authenticates protected API requests using an API Key.
+    Accepts:
+      - 'X-API-Key: <key>'
+      - 'Authorization: Bearer <key>'
+    The configured key is read from DECRYPT_API_KEY (default: 'decrypt-dev-key').
+    """
+    expected_key = os.getenv("DECRYPT_API_KEY", "decrypt-dev-key")
+
+    token = None
+    if x_api_key:
+        token = x_api_key.strip()
+    elif authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() in ["bearer", "token", "apikey"]:
+            token = parts[1]
+        elif len(parts) == 1:
+            token = parts[0]
+
+    if not token or not hmac.compare_digest(token, expected_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key. Provide 'X-API-Key' or 'Authorization: Bearer <key>' header."
+        )
+    return token
 
 
 def verify_alchemy_signature(body_bytes: bytes, signature_header: Optional[str], signing_key: Optional[str]) -> bool:
