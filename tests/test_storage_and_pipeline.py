@@ -77,6 +77,10 @@ def test_incremental_feature_extraction():
     assert feats["direction_switch_count"] == 3.0
     assert feats["alternation_rate"] == 1.0
     assert feats["max_alternating_run_length"] == 4.0
+    assert "activity_centroid" in feats
+    assert 0.0 <= feats["activity_centroid"] <= 1.0
+    assert "days_since_first" not in feats
+    assert "days_until_end" not in feats
 
 
 def test_realtime_scorer_short_history_vs_full():

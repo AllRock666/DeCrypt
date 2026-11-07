@@ -1,3 +1,4 @@
+import os
 import hmac
 import hashlib
 from decimal import Decimal
@@ -6,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from decrypt.service.app import app
+from decrypt.security.verification import is_auth_configured, verify_api_key
 from decrypt.domain.schema import (
     UnifiedTransaction,
     TransactionSource,
@@ -16,9 +18,37 @@ from decrypt.domain.schema import (
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setenv("DECRYPT_DEV_MODE", "1")
     with TestClient(app) as test_client:
         yield test_client
+
+
+def test_service_startup_fails_closed_without_auth(monkeypatch):
+    """Verify that service startup raises RuntimeError when neither DECRYPT_API_KEY nor DECRYPT_DEV_MODE=1 is set."""
+    monkeypatch.delenv("DECRYPT_API_KEY", raising=False)
+    monkeypatch.delenv("DECRYPT_DEV_MODE", raising=False)
+    assert not is_auth_configured()
+    with pytest.raises(RuntimeError) as exc_info:
+        with TestClient(app):
+            pass
+    assert "DECRYPT_API_KEY environment variable is not set" in str(exc_info.value)
+
+
+def test_service_startup_succeeds_with_explicit_api_key(monkeypatch):
+    """Verify service starts successfully when DECRYPT_API_KEY is provided."""
+    monkeypatch.delenv("DECRYPT_DEV_MODE", raising=False)
+    monkeypatch.setenv("DECRYPT_API_KEY", "super-secret-production-key-12345")
+    assert is_auth_configured()
+    with TestClient(app) as test_client:
+        r = test_client.get("/health")
+        assert r.status_code == 200
+        # Protected route works with the configured key
+        r_auth = test_client.get("/risk", headers={"X-API-Key": "super-secret-production-key-12345"})
+        assert r_auth.status_code == 200
+        # Protected route rejects wrong key
+        r_bad = test_client.get("/risk", headers={"X-API-Key": "wrong-key"})
+        assert r_bad.status_code == 401
 
 
 def test_health_and_metrics_endpoints(client):

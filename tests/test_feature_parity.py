@@ -27,15 +27,12 @@ def test_batch_vs_incremental_feature_parity_20_real_entities():
     df = load_transaction_data("data/bitcoin_transactions.csv", config)
     batch_features = extract_behavioral_features(df, config)
 
-    # Global time bounds and amount quantile bins from dataset
-    global_min_time = pd.to_datetime(df["timestamp"].min()).tz_localize(timezone.utc)
-    global_max_time = pd.to_datetime(df["timestamp"].max()).tz_localize(timezone.utc)
+    # Amount quantile bins from dataset
     abs_amt = df["amount"].abs()
     _, q_bins = pd.qcut(abs_amt, q=10, retbins=True, duplicates="drop")
 
+    # Incremental extractor (entity-relative, unbounded history mode)
     extractor = IncrementalFeatureExtractor(
-        global_min_time=global_min_time,
-        global_max_time=global_max_time,
         amount_bins=q_bins,
         large_tx_multiplier=config.large_tx_multiplier
     )

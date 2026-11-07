@@ -18,9 +18,12 @@ from decrypt.domain.schema import UnifiedTransaction, TransactionType
 class EntityStateManager:
     """
     In-memory / cache manager tracking entity transaction history windows.
+    Defaults to capping per-entity in-memory history at 5000 events to balance
+    memory usage with behavioral fidelity. Set max_history_per_entity=None for
+    unbounded mode (e.g. offline parity testing).
     """
 
-    def __init__(self, max_history_per_entity: Optional[int] = None):
+    def __init__(self, max_history_per_entity: Optional[int] = 5000):
         self.max_history = max_history_per_entity
         # Map: entity_id -> list of UnifiedTransaction sorted by timestamp
         self._entity_histories: Dict[str, List[UnifiedTransaction]] = {}
@@ -43,7 +46,7 @@ class EntityStateManager:
             history.sort(key=lambda t: t.timestamp)
 
         # Enforce bounded window if specified
-        if self.max_history and len(history) > self.max_history:
+        if self.max_history and self.max_history > 0 and len(history) > self.max_history:
             self._entity_histories[tx.entity_id] = history[-self.max_history:]
 
         return self._entity_histories[tx.entity_id]
@@ -51,7 +54,7 @@ class EntityStateManager:
     def load_entity_history(self, entity_id: str, transactions: List[UnifiedTransaction]):
         """Populates history from persistent storage."""
         sorted_txs = sorted(transactions, key=lambda t: t.timestamp)
-        if self.max_history:
+        if self.max_history and self.max_history > 0:
             self._entity_histories[entity_id] = sorted_txs[-self.max_history:]
         else:
             self._entity_histories[entity_id] = sorted_txs
@@ -68,27 +71,16 @@ class IncrementalFeatureExtractor:
 
     def __init__(
         self,
-        global_min_time: Optional[datetime] = None,
-        global_max_time: Optional[datetime] = None,
         amount_bins: Optional[Sequence[float]] = None,
         large_tx_multiplier: float = 3.0
     ):
-        def _to_utc(dt):
-            if dt is None:
-                return None
-            pdt = pd.to_datetime(dt)
-            if pdt.tzinfo is None:
-                return pdt.tz_localize(timezone.utc)
-            return pdt.tz_convert(timezone.utc)
-
-        self.global_min_time = _to_utc(global_min_time)
-        self.global_max_time = _to_utc(global_max_time) or datetime.now(timezone.utc)
         self.amount_bins = list(amount_bins) if amount_bins is not None else None
         self.large_tx_multiplier = large_tx_multiplier
 
     def compute_features(self, history: List[UnifiedTransaction]) -> Dict[str, float]:
         """
-        Extracts identical 23 features as extract_behavioral_features for a single entity history.
+        Extracts identical 28 features as extract_behavioral_features for a single entity history.
+        Strictly entity-relative, avoiding absolute calendar timestamp dependencies.
         """
         if not history:
             return self._empty_features()
@@ -123,19 +115,18 @@ class IncrementalFeatureExtractor:
         max_flow = max(total_deposited, total_withdrawn)
         pass_through_ratio = min(total_deposited, total_withdrawn) / max_flow if max_flow > 0 else 0.0
 
-        # 3. Timestamps & Recency
+        # 3. Timestamps & Recency (strictly entity-relative)
         first_tx = timestamps[0]
         last_tx = timestamps[-1]
-        activity_period_days = max(0.0, (last_tx - first_tx).total_seconds() / 86400.0)
-        if self.global_min_time is not None:
-            days_since_first = (first_tx - self.global_min_time).total_seconds() / 86400.0
-        else:
-            days_since_first = 0.0
+        active_span_sec = (last_tx - first_tx).total_seconds()
+        activity_period_days = max(0.0, active_span_sec / 86400.0)
 
-        if self.global_max_time is not None:
-            days_until_end = (self.global_max_time - last_tx).total_seconds() / 86400.0
+        # Entity-relative activity centroid: mean time offset from first_tx normalized by active span [0.0, 1.0]
+        if active_span_sec > 0 and n_txs > 1:
+            offsets = np.array([(t - first_tx).total_seconds() for t in timestamps])
+            activity_centroid = float(np.mean(offsets) / active_span_sec)
         else:
-            days_until_end = 0.0
+            activity_centroid = 0.5
 
         # 4. Temporal dynamics & Burstiness
         if n_txs > 1:
@@ -224,8 +215,7 @@ class IncrementalFeatureExtractor:
             "deposit_withdraw_ratio": deposit_withdraw_ratio,
             "pass_through_ratio": pass_through_ratio,
             "activity_period_days": activity_period_days,
-            "days_since_first": days_since_first,
-            "days_until_end": days_until_end,
+            "activity_centroid": activity_centroid,
             "burstiness": burstiness,
             "avg_time_between_txs": avg_time_between_txs,
             "tx_time_variance": tx_time_variance,
@@ -246,7 +236,7 @@ class IncrementalFeatureExtractor:
             "total_transactions", "total_volume", "net_flow", "avg_transaction_size",
             "max_transaction", "min_transaction", "transaction_variance", "total_deposited",
             "total_withdrawn", "n_deposits", "n_withdrawals", "deposit_withdraw_ratio",
-            "pass_through_ratio", "activity_period_days", "days_since_first", "days_until_end",
+            "pass_through_ratio", "activity_period_days", "activity_centroid",
             "burstiness", "avg_time_between_txs", "tx_time_variance", "cv_inter_event_time",
             "lag1_autocorr_inter_event_time", "modal_amount_share", "amount_entropy",
             "large_transaction_ratio", "weekend_ratio", "unique_interactions",

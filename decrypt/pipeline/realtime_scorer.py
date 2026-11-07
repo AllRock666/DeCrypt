@@ -7,6 +7,7 @@ tabular deviance with Transformer sequence surprise via empirical CDF calibratio
 
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
+from datetime import datetime, timezone
 import json
 import logging
 import numpy as np
@@ -52,6 +53,8 @@ class RealTimeScorer:
         # Training domain & source guard configuration
         self.training_domain: str = "crypto_bitcoin"
         self.training_asset: str = "BTC"
+        self.training_date_min: str = "2011-05-17T21:47:00Z"
+        self.training_date_max: str = "2014-02-18T11:30:00Z"
         self.model_version: str = "v2.0-realtime-ensemble"
         self.per_source_calibration: Dict[str, Dict[str, np.ndarray]] = {}
 
@@ -140,6 +143,8 @@ class RealTimeScorer:
                     meta = json.load(f)
                     self.training_domain = meta.get("training_domain", self.training_domain)
                     self.training_asset = meta.get("training_asset", self.training_asset)
+                    self.training_date_min = meta.get("training_date_min", self.training_date_min)
+                    self.training_date_max = meta.get("training_date_max", self.training_date_max)
             except Exception as e:
                 logger.warning(f"Could not load model metadata: {e}")
         else:
@@ -149,6 +154,8 @@ class RealTimeScorer:
                     json.dump({
                         "training_domain": self.training_domain,
                         "training_asset": self.training_asset,
+                        "training_date_min": self.training_date_min,
+                        "training_date_max": self.training_date_max,
                         "model_version": self.model_version,
                         "calibrated_sources": [self.training_domain, "csv_import", "internal"]
                     }, f, indent=2)
@@ -272,16 +279,36 @@ class RealTimeScorer:
                 for idx in top_indices
             ]
 
+        # Check for temporal drift against training date bounds
+        temporal_drift_warning = False
+        if history and self.training_date_min and self.training_date_max:
+            try:
+                min_bound = pd.to_datetime(self.training_date_min).tz_convert(timezone.utc) if pd.to_datetime(self.training_date_min).tzinfo else pd.to_datetime(self.training_date_min).tz_localize(timezone.utc)
+                max_bound = pd.to_datetime(self.training_date_max).tz_convert(timezone.utc) if pd.to_datetime(self.training_date_max).tzinfo else pd.to_datetime(self.training_date_max).tz_localize(timezone.utc)
+                for tx in history:
+                    tx_ts = tx.timestamp if tx.timestamp.tzinfo else tx.timestamp.replace(tzinfo=timezone.utc)
+                    if tx_ts < min_bound or tx_ts > max_bound:
+                        temporal_drift_warning = True
+                        logger.warning(
+                            f"Temporal drift warning: Transaction {tx.transaction_id} timestamp ({tx_ts.isoformat()}) "
+                            f"is outside training date range [{self.training_date_min}, {self.training_date_max}]."
+                        )
+                        break
+            except Exception as e:
+                logger.error(f"Error checking temporal drift: {e}")
+
         # 2. Sequence Transformer Surprise Scoring
         top_events: List[Dict[str, Any]] = []
         if n_events < self.config.min_seq_len or self.tf_model is None:
             insufficient_history = True
             tf_surprise = 0.0
+            tf_topk = 0.0
+            tf_window_max = 0.0
             tf_pct = if_pct  # Defaults to IF
             ensemble_score = if_pct
         else:
             insufficient_history = False
-            tf_surprise, top_events = self._compute_sequence_surprise(history)
+            tf_surprise, tf_topk, tf_window_max, top_events = self._compute_sequence_surprise(history)
             tf_pct = self.calibrate_percentile(tf_surprise, active_tf_ref)
             # Tuned Weighted Ensemble: 0.8 * IF + 0.2 * TF
             ensemble_score = float(self.w_if * if_pct + self.w_tf * tf_pct)
@@ -306,8 +333,11 @@ class RealTimeScorer:
             "ensemble_risk_score": round(ensemble_score, 2),
             "if_risk_score": round(if_pct, 2),
             "transformer_surprise": round(tf_surprise, 3),
+            "transformer_surprise_topk": round(tf_topk, 3),
+            "transformer_surprise_window_max": round(tf_window_max, 3),
             "percentile_rank": round(ensemble_score, 2),
             "insufficient_history": insufficient_history,
+            "temporal_drift_warning": temporal_drift_warning,
             "top_features": top_features,
             "top_events": top_events,
             "explanation": explanation,
@@ -317,10 +347,13 @@ class RealTimeScorer:
 
     def _compute_sequence_surprise(
         self,
-        history: List[UnifiedTransaction]
-    ) -> Tuple[float, List[Dict[str, Any]]]:
+        history: List[UnifiedTransaction],
+        top_k: int = 3,
+        rolling_window: int = 3
+    ) -> Tuple[float, float, float, List[Dict[str, Any]]]:
         """
         Evaluates leave-one-out event surprise over the entity history using the PyTorch Transformer.
+        Returns (mean_surprise, topk_surprise, window_max_surprise, top_3_events).
         """
         n = min(len(history), self.config.max_seq_len)
         recent_txs = history[-n:]
@@ -412,11 +445,24 @@ class RealTimeScorer:
 
         mean_surprise = float(np.mean(nll_totals)) if nll_totals else 0.0
 
+        # Top-k surprise
+        if len(nll_totals) >= top_k:
+            topk_surprise = float(np.mean(np.sort(nll_totals)[-top_k:]))
+        else:
+            topk_surprise = mean_surprise
+
+        # Sliding window max surprise
+        if len(nll_totals) <= rolling_window:
+            window_max_surprise = mean_surprise
+        else:
+            w_means = [float(np.mean(nll_totals[i : i + rolling_window])) for i in range(len(nll_totals) - rolling_window + 1)]
+            window_max_surprise = float(np.max(w_means))
+
         # Sort for top-3 most surprising events
         event_surprises.sort(key=lambda ev: ev["nll"], reverse=True)
         top_3 = event_surprises[:3]
 
-        return mean_surprise, top_3
+        return mean_surprise, topk_surprise, window_max_surprise, top_3
 
     def _build_narrative(
         self,

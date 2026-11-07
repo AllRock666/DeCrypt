@@ -393,10 +393,20 @@ class SequenceAnomalyDetector:
             
         return {'trained': True, 'best_val_loss': float(best_val_loss)}
 
-    def score_addresses(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, List[Dict[str, Any]]], np.ndarray]:
+    def score_addresses(
+        self,
+        df: pd.DataFrame,
+        top_k: int = 3,
+        rolling_window: int = 3
+    ) -> Tuple[pd.DataFrame, Dict[str, List[Dict[str, Any]]], np.ndarray]:
         """
         Computes leave-one-out surprise scores, top-3 explainability events,
         and address sequence embeddings for all addresses.
+        Supports score aggregations:
+          - transformer_surprise (mean across all events)
+          - transformer_surprise_mean (mean across all events)
+          - transformer_surprise_topk (mean of top-k most surprising events)
+          - transformer_surprise_window_max (maximum rolling window mean surprise)
         """
         self.model.eval()
         events_by_address = extract_address_events(df, self.amt_edges, self.dt_edges)
@@ -420,6 +430,9 @@ class SequenceAnomalyDetector:
                     records.append({
                         'address': addr,
                         'transformer_surprise': 0.0,
+                        'transformer_surprise_mean': 0.0,
+                        'transformer_surprise_topk': 0.0,
+                        'transformer_surprise_window_max': 0.0,
                         'insufficient_history': True,
                         'seq_length': length
                     })
@@ -518,6 +531,18 @@ class SequenceAnomalyDetector:
                 mean_nll = event_nll_accum / np.maximum(event_counts, 1)
                 surprise = float(np.mean(mean_nll))
                 
+                # Aggregations: top-k mean and sliding-window max
+                if length >= top_k:
+                    topk_surprise = float(np.mean(np.sort(mean_nll)[-top_k:]))
+                else:
+                    topk_surprise = surprise
+                    
+                if length <= rolling_window:
+                    window_max_surprise = surprise
+                else:
+                    w_means = [float(np.mean(mean_nll[i : i + rolling_window])) for i in range(length - rolling_window + 1)]
+                    window_max_surprise = float(np.max(w_means))
+                
                 # Mean embedding across windows
                 avg_embed = np.mean(window_embeds, axis=0)
                 embeddings_list.append(avg_embed)
@@ -538,6 +563,9 @@ class SequenceAnomalyDetector:
                 records.append({
                     'address': addr,
                     'transformer_surprise': surprise,
+                    'transformer_surprise_mean': surprise,
+                    'transformer_surprise_topk': topk_surprise,
+                    'transformer_surprise_window_max': window_max_surprise,
                     'insufficient_history': False,
                     'seq_length': length
                 })

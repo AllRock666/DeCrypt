@@ -12,18 +12,47 @@ from fastapi.security import APIKeyHeader
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
+def is_auth_configured() -> bool:
+    """
+    Checks if API authentication is explicitly configured via DECRYPT_API_KEY
+    or if development mode is explicitly enabled via DECRYPT_DEV_MODE=1.
+    """
+    if os.getenv("DECRYPT_API_KEY"):
+        return True
+    dev_mode = os.getenv("DECRYPT_DEV_MODE", "0").strip().lower()
+    return dev_mode in ["1", "true", "yes"]
+
+
+def get_configured_api_key() -> Optional[str]:
+    """
+    Retrieves the expected API key. Returns None if unconfigured.
+    """
+    api_key = os.getenv("DECRYPT_API_KEY")
+    if api_key:
+        return api_key.strip()
+    dev_mode = os.getenv("DECRYPT_DEV_MODE", "0").strip().lower()
+    if dev_mode in ["1", "true", "yes"]:
+        return "decrypt-dev-key"
+    return None
+
+
 def verify_api_key(
     x_api_key: Optional[str] = Security(api_key_header),
     authorization: Optional[str] = Header(None)
 ) -> str:
     """
     Authenticates protected API requests using an API Key.
+    Fails closed: requires DECRYPT_API_KEY in environment or DECRYPT_DEV_MODE=1.
     Accepts:
       - 'X-API-Key: <key>'
       - 'Authorization: Bearer <key>'
-    The configured key is read from DECRYPT_API_KEY (default: 'decrypt-dev-key').
     """
-    expected_key = os.getenv("DECRYPT_API_KEY", "decrypt-dev-key")
+    expected_key = get_configured_api_key()
+    if not expected_key:
+        raise HTTPException(
+            status_code=500,
+            detail="API authentication unconfigured: DECRYPT_API_KEY is not set and DECRYPT_DEV_MODE is not enabled."
+        )
 
     token = None
     if x_api_key:
@@ -35,7 +64,7 @@ def verify_api_key(
         elif len(parts) == 1:
             token = parts[0]
 
-    if not token or not hmac.compare_digest(token, expected_key):
+    if not token or not hmac.compare_digest(token.encode("utf-8"), expected_key.encode("utf-8")):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing API key. Provide 'X-API-Key' or 'Authorization: Bearer <key>' header."

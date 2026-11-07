@@ -29,15 +29,20 @@ from decrypt.pipeline.incremental import EntityStateManager
 from decrypt.pipeline.realtime_scorer import RealTimeScorer
 from decrypt.providers.plaid_adapter import PlaidAdapter
 from decrypt.providers.alchemy_adapter import AlchemyAdapter
-from decrypt.security.verification import verify_alchemy_signature, verify_plaid_webhook, verify_api_key
+from decrypt.security.verification import (
+    verify_alchemy_signature,
+    verify_plaid_webhook,
+    verify_api_key,
+    is_auth_configured
+)
 from decrypt.security.redaction import redact_sensitive_dict
 from .metrics import metrics
 
 logger = logging.getLogger("decrypt.service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-# Global in-memory managers
-state_manager = EntityStateManager(max_history_per_entity=None)
+# Global in-memory managers (bounded history defaults to 5000 events)
+state_manager = EntityStateManager(max_history_per_entity=int(os.getenv("DECRYPT_MAX_ENTITY_HISTORY", "5000")))
 scorer: Optional[RealTimeScorer] = None
 plaid_adapter = PlaidAdapter(
     client_id=os.getenv("PLAID_CLIENT_ID"),
@@ -74,6 +79,15 @@ def check_rate_limit(request: Request):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global scorer
+    # Fail-closed authentication validation:
+    # Service refuses to start protected routes unless DECRYPT_API_KEY is configured
+    # or development mode is explicitly enabled with DECRYPT_DEV_MODE=1.
+    if not is_auth_configured():
+        raise RuntimeError(
+            "Service startup failed: DECRYPT_API_KEY environment variable is not set. "
+            "Set DECRYPT_API_KEY=<secret> or explicitly set DECRYPT_DEV_MODE=1 for local development."
+        )
+
     logger.info("Initializing DeCrypt Database and Real-Time Pipeline...")
     init_db()
     scorer = RealTimeScorer()

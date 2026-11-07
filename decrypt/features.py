@@ -56,15 +56,21 @@ def extract_behavioral_features(df: pd.DataFrame, config: Config) -> pd.DataFram
     max_flow = np.maximum(dep, wd)
     features['pass_through_ratio'] = np.where(max_flow > 0, np.minimum(dep, wd) / max_flow, 0.0)
     
-    # 3. Timestamps & Recency
+    # 3. Timestamps & Recency (strictly entity-relative)
     first_tx = grouped['timestamp'].min()
     last_tx = grouped['timestamp'].max()
-    global_min_time = df['timestamp'].min()
-    global_max_time = df['timestamp'].max()
     
-    features['activity_period_days'] = (last_tx - first_tx).dt.total_seconds() / 86400.0
-    features['days_since_first'] = (first_tx - global_min_time).dt.total_seconds() / 86400.0
-    features['days_until_end'] = (global_max_time - last_tx).dt.total_seconds() / 86400.0
+    span_seconds = (last_tx - first_tx).dt.total_seconds()
+    features['activity_period_days'] = span_seconds / 86400.0
+    
+    # Entity-relative activity centroid: mean time offset from first_tx normalized by active span [0.0, 1.0]
+    first_tx_per_row = df_sorted.groupby('address_id')['timestamp'].transform('min')
+    df_sorted['offset_sec'] = (df_sorted['timestamp'] - first_tx_per_row).dt.total_seconds()
+    mean_offset = df_sorted.groupby('address_id')['offset_sec'].mean()
+    features['activity_centroid'] = pd.Series(
+        np.where(span_seconds > 0, mean_offset / span_seconds, 0.5),
+        index=features.index
+    ).fillna(0.5)
     
     # 4. Temporal dynamics & Burstiness
     delta_stats = grouped['delta_t'].agg(['mean', 'std', 'var'])

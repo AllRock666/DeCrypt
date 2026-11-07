@@ -291,7 +291,9 @@ def run_single_seed_benchmark(
     df: pd.DataFrame,
     seed: int,
     config: Config,
-    n_per_type: int = 20
+    n_per_type: int = 20,
+    w_if: float = 0.8,
+    w_tf: float = 0.2
 ) -> Dict[str, Any]:
     """
     Evaluates Legacy IF, Fixed IF, Transformer, Mean-Rank, Max-Rank, and Tuned Weighted Fusion.
@@ -389,8 +391,9 @@ def run_single_seed_benchmark(
     # 5. Max-Rank Fusion
     scores_max_rank = np.maximum(ranks_fixed, ranks_tf)
     
-    # 6. Tuned Weighted Fusion (w_IF=0.8, w_TF=0.2 from tuning seeds)
-    scores_tuned = 0.8 * ranks_fixed + 0.2 * ranks_tf
+    # 6. Tuned Weighted Fusion (selected from independent tuning seeds 101-103)
+    scores_tuned = w_if * ranks_fixed + w_tf * ranks_tf
+    tuned_label = f'Ensemble (Tuned {w_if:.1f}/{w_tf:.1f})'
     
     models = {
         'Legacy IF': scores_legacy,
@@ -399,7 +402,7 @@ def run_single_seed_benchmark(
         'Transformer': scores_tf,
         'Ensemble (Mean-Rank)': scores_mean_rank,
         'Ensemble (Max-Rank)': scores_max_rank,
-        'Ensemble (Tuned 0.8/0.2)': scores_tuned
+        tuned_label: scores_tuned
     }
     
     results = {}
@@ -435,7 +438,7 @@ def run_single_seed_benchmark(
         addrs_d = [a for a in synth_addrs if f"synth_passthrough_{d_tag}" in a]
         n_d = len(addrs_d)
         pt_delay_recalls[d_tag] = {}
-        for m_name in ['Fixed IF', 'Transformer', 'Ensemble (Tuned 0.8/0.2)']:
+        for m_name in ['Fixed IF', 'Transformer', tuned_label]:
             s = models[m_name]
             top_k_indices = np.argsort(-s)[:k]
             top_k_addrs = set(all_test_addrs[i] for i in top_k_indices)
@@ -445,21 +448,112 @@ def run_single_seed_benchmark(
     return {
         'seed': seed,
         'metrics': results,
+        'tuned_label': tuned_label,
         'pt_delay_recalls': pt_delay_recalls,
         'y_true': y_true.tolist(),
         'n_anomalies': len(synth_addrs),
         'n_normal': len(test_real_addrs)
     }
 
+def tune_fusion_weights(
+    df: pd.DataFrame,
+    config: Config,
+    tuning_seeds: List[int] = [101, 102, 103],
+    n_per_type: int = 20,
+    weight_grid: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+) -> Tuple[float, float, Dict[str, Any]]:
+    """
+    Selects optimal fusion weights (w_if, w_tf) using separate tuning seeds (101, 102, 103)
+    to prevent tuning on test benchmark seeds.
+    """
+    logger.info(f"Tuning fusion weights across seeds {tuning_seeds} over grid {weight_grid}...")
+    grid_metrics = {w: {'auroc': [], 'ap': [], 'recall_at_k': []} for w in weight_grid}
+    
+    for s in tuning_seeds:
+        cfg = Config(
+            epochs=config.epochs,
+            seed=s,
+            random_state=s,
+            contamination=config.contamination
+        )
+        rng = np.random.default_rng(s)
+        real_addresses = np.array(list(df['address_id'].unique()))
+        rng.shuffle(real_addresses)
+        
+        split_idx = int(len(real_addresses) * 0.70)
+        train_addrs = set(real_addresses[:split_idx])
+        test_real_addrs = set(real_addresses[split_idx:])
+        
+        train_df = df[df['address_id'].isin(train_addrs)].copy()
+        test_real_df = df[df['address_id'].isin(test_real_addrs)].copy()
+        
+        synth_df, synth_types = generate_synthetic_anomalies(train_df, n_per_type=n_per_type, seed=s)
+        synth_addrs = set(synth_types.keys())
+        test_df = pd.concat([test_real_df, synth_df], ignore_index=True)
+        all_test_addrs = list(test_real_addrs | synth_addrs)
+        y_true = np.array([1 if a in synth_addrs else 0 for a in all_test_addrs])
+        
+        # Fit Fixed IF
+        train_feats, _ = extract_all_features(train_df, cfg)
+        test_feats, _ = extract_all_features(test_df, cfg)
+        num_train = prepare_numeric_features(train_feats)
+        num_test = prepare_numeric_features(test_feats).reindex(columns=num_train.columns).fillna(0.0)
+        scaler = StandardScaler().fit(num_train)
+        if_model = IsolationForest(contamination=config.contamination, random_state=s).fit(scaler.transform(num_train))
+        scores_if = -if_model.score_samples(scaler.transform(num_test.loc[all_test_addrs]))
+        
+        # Fit TF
+        tf_detector = SequenceAnomalyDetector(cfg)
+        tf_detector.fit(train_df)
+        tf_scores_df, _, _ = tf_detector.score_addresses(test_df)
+        scores_tf = np.array([float(tf_scores_df.loc[a, 'transformer_surprise']) if a in tf_scores_df.index else 0.0 for a in all_test_addrs])
+        
+        ranks_if = rankdata(scores_if) / len(scores_if)
+        ranks_tf = rankdata(scores_tf) / len(scores_tf)
+        k = len(synth_addrs)
+        
+        for w in weight_grid:
+            w_if = round(w, 2)
+            w_tf = round(1.0 - w, 2)
+            fused = w_if * ranks_if + w_tf * ranks_tf
+            auc = float(roc_auc_score(y_true, fused))
+            ap = float(average_precision_score(y_true, fused))
+            top_k_indices = np.argsort(-fused)[:k]
+            top_k_addrs = set(all_test_addrs[i] for i in top_k_indices)
+            rec = len(top_k_addrs & synth_addrs) / max(k, 1)
+            
+            grid_metrics[w]['auroc'].append(auc)
+            grid_metrics[w]['ap'].append(ap)
+            grid_metrics[w]['recall_at_k'].append(rec)
+            
+    best_w = 0.8
+    best_score = -1.0
+    tuning_summary = {}
+    for w in weight_grid:
+        mean_auc = float(np.mean(grid_metrics[w]['auroc']))
+        mean_ap = float(np.mean(grid_metrics[w]['ap']))
+        mean_rec = float(np.mean(grid_metrics[w]['recall_at_k']))
+        tuning_summary[str(w)] = {'auroc': mean_auc, 'ap': mean_ap, 'recall_at_k': mean_rec}
+        if mean_auc > best_score:
+            best_score = mean_auc
+            best_w = w
+            
+    best_w_if = round(best_w, 2)
+    best_w_tf = round(1.0 - best_w_if, 2)
+    logger.info(f"Selected optimal fusion weights from tuning seeds {tuning_seeds}: w_IF={best_w_if}, w_TF={best_w_tf} (tuning AUROC={best_score:.4f})")
+    return best_w_if, best_w_tf, tuning_summary
+
 def run_benchmark(
     df: pd.DataFrame,
     outdir: Path,
     config: Config,
     seeds: List[int] = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51],
+    tuning_seeds: List[int] = [101, 102, 103],
     n_per_type: int = 20
 ) -> Dict[str, Any]:
     """
-    Executes benchmark across 10 seeds (20 per archetype = 100 anomalies/seed),
+    Executes benchmark across 10 held-out evaluation seeds (20 per archetype = 100 anomalies/seed),
+    selects fusion weights on separate tuning seeds (101-103),
     computes 95% bootstrap confidence intervals for all cells, and runs graph sanity test.
     """
     outdir = Path(outdir)
@@ -468,7 +562,13 @@ def run_benchmark(
     # 1. Run Graph Sanity Permutation Test
     sanity_results = run_graph_sanity_test(df, config, n_runs=20, seed=config.seed)
     
-    logger.info(f"=== Starting Synthetic Anomaly Benchmark ({len(seeds)} seeds, {n_per_type*5} anomalies/seed) ===")
+    # 2. Tune fusion weights on tuning seeds
+    best_w_if, best_w_tf, tuning_summary = tune_fusion_weights(
+        df, config, tuning_seeds=tuning_seeds, n_per_type=n_per_type
+    )
+    tuned_label = f'Ensemble (Tuned {best_w_if:.1f}/{best_w_tf:.1f})'
+    
+    logger.info(f"=== Starting Synthetic Anomaly Benchmark ({len(seeds)} held-out seeds, {n_per_type*5} anomalies/seed) ===")
     logger.warning("BENCHMARK CAVEAT: Synthetic anomalies are proxy models. Real addresses may contain true anomalies.")
     
     seed_runs = []
@@ -482,13 +582,15 @@ def run_benchmark(
             link_window_hours=config.link_window_hours,
             link_tolerance=config.link_tolerance
         )
-        run_res = run_single_seed_benchmark(df, seed=s, config=cfg, n_per_type=n_per_type)
+        run_res = run_single_seed_benchmark(
+            df, seed=s, config=cfg, n_per_type=n_per_type, w_if=best_w_if, w_tf=best_w_tf
+        )
         seed_runs.append(run_res)
         
     # Aggregate statistics with 95% Bootstrap Confidence Intervals
     model_names = [
         'Legacy IF', 'Fixed IF', 'Transformer', 
-        'Ensemble (Mean-Rank)', 'Ensemble (Max-Rank)', 'Ensemble (Tuned 0.8/0.2)'
+        'Ensemble (Mean-Rank)', 'Ensemble (Max-Rank)', tuned_label
     ]
     summary = {}
     archetypes = ["structuring", "burst", "pass_through", "bot_periodic", "dormant_spike"]
@@ -513,15 +615,15 @@ def run_benchmark(
     # Paired Bootstrap Confidence Intervals of the Difference (Tuned Fusion vs Fixed IF)
     paired_diffs = {
         'auroc': compute_paired_bootstrap_ci(
-            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['auroc'] for r in seed_runs],
+            [r['metrics'][tuned_label]['auroc'] for r in seed_runs],
             [r['metrics']['Fixed IF']['auroc'] for r in seed_runs]
         ),
         'ap': compute_paired_bootstrap_ci(
-            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['ap'] for r in seed_runs],
+            [r['metrics'][tuned_label]['ap'] for r in seed_runs],
             [r['metrics']['Fixed IF']['ap'] for r in seed_runs]
         ),
         'recall_at_k': compute_paired_bootstrap_ci(
-            [r['metrics']['Ensemble (Tuned 0.8/0.2)']['recall_at_k'] for r in seed_runs],
+            [r['metrics'][tuned_label]['recall_at_k'] for r in seed_runs],
             [r['metrics']['Fixed IF']['recall_at_k'] for r in seed_runs]
         )
     }
@@ -530,7 +632,7 @@ def run_benchmark(
     pt_delay_summary = {}
     for d_tag in ['15m', '1h', '6h', '24h']:
         pt_delay_summary[d_tag] = {}
-        for m_name in ['Transformer', 'Fixed IF', 'Ensemble (Tuned 0.8/0.2)']:
+        for m_name in ['Transformer', 'Fixed IF', tuned_label]:
             vals = [r['pt_delay_recalls'][d_tag][m_name] for r in seed_runs]
             pt_delay_summary[d_tag][m_name] = compute_bootstrap_ci(vals, n_boot=1000, ci=0.95, seed=42)
             
@@ -573,7 +675,7 @@ def run_benchmark(
         'Transformer': '#2ecc71',
         'Ensemble (Mean-Rank)': '#9b59b6',
         'Ensemble (Max-Rank)': '#f39c12',
-        'Ensemble (Tuned 0.8/0.2)': '#1abc9c'
+        tuned_label: '#1abc9c'
     }
     
     for name in model_names:
@@ -584,8 +686,8 @@ def run_benchmark(
         m_auroc = summary[name]['auroc']['mean']
         m_ap = summary[name]['ap']['mean']
         
-        ax_roc.plot(fpr, tpr, label=f"{name} ({m_auroc:.3f})", color=colors[name], lw=2)
-        ax_pr.plot(rec, prec, label=f"{name} ({m_ap:.3f})", color=colors[name], lw=2)
+        ax_roc.plot(fpr, tpr, label=f"{name} ({m_auroc:.3f})", color=colors.get(name, '#1abc9c'), lw=2)
+        ax_pr.plot(rec, prec, label=f"{name} ({m_ap:.3f})", color=colors.get(name, '#1abc9c'), lw=2)
         
     ax_roc.plot([0, 1], [0, 1], 'k--', lw=1.5, alpha=0.6)
     ax_roc.set_title("ROC Curves (10 Seeds, 100 Anomalies/Seed, Gen v2.0)", fontsize=12, fontweight='bold')
@@ -609,6 +711,10 @@ def run_benchmark(
     full_output = {
         'generator_version': 'v2.0',
         'seeds': seeds,
+        'tuning_seeds': tuning_seeds,
+        'tuning_summary': tuning_summary,
+        'tuned_weights': {'w_if': best_w_if, 'w_tf': best_w_tf},
+        'tuned_label': tuned_label,
         'n_anomalies_per_seed': n_per_type * 5,
         'summary': summary,
         'paired_differences_tuned_vs_fixed_if': paired_diffs,
@@ -667,7 +773,8 @@ def print_benchmark_markdown_table(
         for d_tag, d_label in [('15m', '15 minutes (2-15m)'), ('1h', '1 hour (50-70m)'), ('6h', '6 hours (5-7h)'), ('24h', '24 hours (22-26h)')]:
             tf_v = pt_delays[d_tag]['Transformer']
             if_v = pt_delays[d_tag]['Fixed IF']
-            en_v = pt_delays[d_tag]['Ensemble (Tuned 0.8/0.2)']
+            tuned_key = [k for k in pt_delays[d_tag] if 'Tuned' in k][0]
+            en_v = pt_delays[d_tag][tuned_key]
             tf_s = f"{tf_v['mean']:.2f} [{tf_v['ci_lower']:.2f}, {tf_v['ci_upper']:.2f}]"
             if_s = f"{if_v['mean']:.2f} [{if_v['ci_lower']:.2f}, {if_v['ci_upper']:.2f}]"
             en_s = f"{en_v['mean']:.2f} [{en_v['ci_lower']:.2f}, {en_v['ci_upper']:.2f}]"
