@@ -22,6 +22,11 @@ class Config:
     no_transformer: bool = False
     epochs: int = 20
     min_seq_len: int = 3
+    d_model: int = 64
+    n_heads: int = 4
+    num_layers: int = 2
+    dropout: float = 0.1
+    max_seq_len: int = 128
     transformer_weight: float = 0.5
     if_weight: float = 0.5
     

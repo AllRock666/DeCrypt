@@ -1,40 +1,77 @@
-# DeCrypt: Bitcoin & Financial Transaction Fraud Detection Engine
+# DeCrypt: Multi-Source Financial & Cryptocurrency Anomaly Detection Platform
 
-**DeCrypt** is a modular, high-performance Python framework for detecting anomalous and fraudulent entities in cryptocurrency and financial transaction datasets. It combines **vectorized behavioral engineering**, a **heuristic temporal flow graph**, a **BERT-style Masked Event Transformer**, **Isolation Forest**, and **HDBSCAN/KMeans clustering**.
+**DeCrypt** is an end-to-end, high-performance financial and cryptocurrency transaction anomaly detection platform. It combines **multi-source real-time streaming ingestion** (Plaid Sandbox banking, Alchemy EVM, Blockstream/Mempool.space Bitcoin, legacy CSVs) with **calibrated machine learning** (vectorized behavioral profiling, Isolation Forest, and a BERT-style Masked Event Transformer).
+
+DeCrypt operates in two complementary modes:
+1. **Continuous Real-Time Streaming Service**: A high-throughput FastAPI service with sliding-window rate limiting, HMAC webhook signature verification, SHA-256 idempotency, incremental 23-feature extraction, and leave-one-out sequence surprise scoring.
+2. **Forensic Batch Engine**: Full offline dataset analysis generating multi-page PDF dossiers, cross-seed synthetic fraud benchmarks, clustering diagnostics, and CSV score exports.
 
 ---
 
-## Architecture & Features
+## Architecture & System Overview
 
-1. **Vectorized Behavioral & Temporal Profiling**:
+For detailed technical designs, refer to the dedicated documentation:
+- 📖 [**Architecture Specification (`ARCHITECTURE.md`)**](file:///e:/projects/DeCrypt/DeCrypt/ARCHITECTURE.md)
+- 🔌 [**REST API Reference (`API_DOCUMENTATION.md`)**](file:///e:/projects/DeCrypt/DeCrypt/API_DOCUMENTATION.md)
+- 🚀 [**Installation & Setup Guide (`SETUP.md`)**](file:///e:/projects/DeCrypt/DeCrypt/SETUP.md)
+- 🔍 [**Architecture & Security Audit (`ARCHITECTURE_AUDIT.md`)**](file:///e:/projects/DeCrypt/DeCrypt/ARCHITECTURE_AUDIT.md)
+
+### Core Components
+
+1. **Unified Domain & Canonical Schema (`decrypt.domain.schema`)**:
+   - `UnifiedTransaction` schema enforcing arbitrary `Decimal` precision (eliminating IEEE 754 floating-point drift) and strict UTC normalization.
+   - Deterministic SHA-256 idempotency key generation across heterogeneous providers.
+   - Genuine wallet-level UTXO decomposition for Bitcoin transactions, distinguishing actual net spend/receipt from unrelated multi-input/output change flows.
+   - Seamless bidirectional backward compatibility with legacy 5-column transaction CSVs.
+
+2. **Multi-Source Ingestion Layer (`decrypt.providers`)**:
+   - **Banking (Plaid Sandbox)**: `/transactions/sync` cursor-based synchronization, modification/removal handling, and webhook verification. Inverts Plaid debit amounts to standard outflows.
+   - **EVM Blockchains (Alchemy)**: Native ETH and ERC-20 transfers across Ethereum, Arbitrum, Optimism, Polygon, and Base via `alchemy_getAssetTransfers`. Includes HMAC-SHA256 signature verification for address activity webhooks.
+   - **Bitcoin (Esplora / Mempool.space)**: Confirmed on-chain transaction history, unconfirmed mempool tracking, and exact Satoshi-to-BTC fixed-base conversion.
+
+3. **Incremental Real-Time ML Engine (`decrypt.pipeline`)**:
+   - **State Management**: `EntityStateManager` maintains an in-memory sliding window of the last 128 events per entity.
+   - **Incremental Behavioral Profiling**: `IncrementalFeatureExtractor` computes the exact 23 vectorized features on-the-fly without requiring full-dataset group-by table scans.
+   - **Reference Distribution Calibration**: Eliminates $N=1$ rank distortion in real-time inference by scoring entities against frozen empirical CDF reference distributions (`scipy.stats.percentileofscore`).
+   - **Sequence Surprise Inference**: Leave-one-out masking on `EventTransformerModel` evaluates negative log-likelihood (NLL) surprise of recent transactions without retraining.
+   - **Automated Explainability**: Generates top anomalous behavioral features and identifies the top-3 most surprising sequence events.
+
+4. **Vectorized Behavioral & Temporal Profiling (23 Features)**:
    - Computes true volume ($\sum |amount|$), net flow ($\sum amount$), pass-through ratios, and deposit/withdrawal distributions.
    - Inactivity metrics via `days_until_end` relative to dataset boundaries.
    - Temporal dynamics via **Goh-Barabási burstiness** $B = \frac{\sigma - \mu}{\sigma + \mu}$, **Coefficient of Variation (CV)** of inter-event times, **lag-1 autocorrelation** of $\Delta t$, and Shannon amount entropy.
    - High-precision behavioral features: **modal-amount share** ($\frac{\text{count}(\text{mode})}{\text{total\_txs}}$) targeting automated/bot behavior.
    - Direction transition dynamics: **`direction_switch_count`** (consecutive event pairs with opposite direction), **`alternation_rate`** ($\frac{\text{switches}}{N-1}$), and **`max_alternating_run_length`** (longest run of alternating direction transitions).
-2. **Heuristic Flow Graph (Negative Result: Excluded by Default)**:
+
+5. **Heuristic Flow Graph (Negative Result: Excluded by Default)**:
    - Traces fund movements between withdrawals and deposits occurring within a configurable window (24h, 2% tolerance).
    - **Permutation Sanity Test & Negative Result**: Evaluated against null permutation models (20 timestamp-shuffled runs: mean 183.5 edges; 20 amount-shuffled runs: mean 154.5 edges vs. real 137 edges). Permuting timestamps and amounts yields *equal or more* edges than the real graph.
    - **Ablation Finding**: An ablation benchmark confirms that adding these network features degrades Isolation Forest performance ($\Delta \text{AUROC} = -0.0208$, $\Delta \text{AP} = -0.0566$, $\Delta \text{Recall@K} = -0.0500$). Consequently, the heuristic graph is formally reclassified as a **negative result** and network features are excluded from scoring by default (retained behind `--include-network-features`).
-3. **Masked Event Transformer (`decrypt.sequence`)**:
+
+6. **Masked Event Transformer (`decrypt.sequence`)**:
    - 2-layer, 4-head Transformer encoder ($d_{\text{model}} = 64$) trained on discrete/continuous transaction sequences via 15% masked event modeling.
    - Generates leave-one-out event **negative log-likelihood (NLL) surprise scores**.
    - Provides per-address explainability by reporting the top-3 most surprising transactions.
    - Extracts mean-pooled sequence embeddings for non-linear density clustering via **HDBSCAN** and KMeans on the subset of entities with $\ge 3$ events.
    - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
-4. **Ensemble Risk Fusion**:
+
+7. **Ensemble Risk Fusion**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
    - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), and **Tuned Weighted Fusion** ($0.8 \times \text{rank}_{\text{IF}} + 0.2 \times \text{rank}_{\text{TF}}$, calibrated on independent tuning seeds).
    - Entities with fewer than `min_seq_len` (default 3) events (143 with 1 tx + 131 with 2 txs = 274 addresses) are tagged with `insufficient_history=True` and scored via Isolation Forest alone.
-5. **Clustering Diagnostics & Subset Analysis**:
+
+8. **Clustering Diagnostics & Subset Analysis**:
    - Tabular KMeans identifies $k=2$ clusters with extreme single-cluster dominance (Cluster 1: 634 addresses / 98.1%; Cluster 0: 12 volume outliers / 1.9%), triggering an automated `>90% single cluster` diagnostic flag.
    - HDBSCAN evaluated strictly on addresses with $\ge 3$ events ($N=372$) produces 2 clusters (silhouette 0.0984, sizes: Cluster 0 with 339 entities, Cluster 1 with 7 entities, and 26 noise points). KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.4180, sizes: 187 and 185).
-6. **Synthetic Anomaly Benchmark Suite (`decrypt.benchmark`, Gen v2.0)**:
+
+9. **Synthetic Anomaly Benchmark Suite (`decrypt.benchmark`, Gen v2.0)**:
    - Evaluates performance against 5 realistic fraud archetypes: Structuring, Bursts, Alternating Deposit/Withdraw (formerly pass-through, with delay variants: 15m, 1h, 6h, 24h), Bot-Periodic, and Dormant-Spike patterns.
    - Evaluates across 10 random seeds with 20 injections per archetype (100 synthetic anomalies/seed).
    - Computes 95% bootstrap confidence intervals for all metrics as well as **paired bootstrap CIs of the difference** ($\text{Tuned Fusion} - \text{Fixed IF}$).
-7. **Multi-Page Reporting**:
-   - Programmatically generates `risk_scores.csv`, a 6-panel visualization dashboard (`fraud_analysis_patterns.png`), and a detailed PDF risk dossier (`fraud_analysis_report.pdf`).
+
+10. **Multi-Page Reporting & API Services**:
+    - Programmatically generates `risk_scores.csv`, a 6-panel visualization dashboard (`fraud_analysis_patterns.png`), and a detailed PDF risk dossier (`fraud_analysis_report.pdf`).
+    - Exposes complete real-time REST API with `/transactions/ingest`, `/risk/{entity_id}`, `/metrics`, and `/health`.
 
 ---
 
@@ -52,23 +89,57 @@ uv venv venv
 uv pip install -r requirements.txt
 ```
 
-*(Alternatively, you can use standard Python: `python -m venv venv && pip install -r requirements.txt`)*
+*(Alternatively: `python -m venv venv && pip install -r requirements.txt`)*
 
 ---
 
-## Usage
+## Quickstart
 
-### 1. Standard End-to-End Analysis
+### 1. Launch the Real-Time Ingestion Service
 
-Analyze a transaction dataset and output the complete risk dossier:
+```bash
+uvicorn decrypt.service.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+- **Health Check**: `GET http://localhost:8000/health`
+- **Interactive OpenAPI UI**: `http://localhost:8000/docs`
+- **Telemetry Metrics**: `GET http://localhost:8000/metrics`
+
+### 2. Ingest a Transaction via REST
+
+```bash
+curl -X POST http://localhost:8000/transactions/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transaction_id": "tx_demo_001",
+    "source": "crypto_ethereum",
+    "network": "ethereum_mainnet",
+    "entity_id": "0x71C...b847",
+    "transaction_hash": "0xabc...123",
+    "timestamp": "2026-11-07T10:00:00Z",
+    "transaction_type": "deposit",
+    "amount": "2.5",
+    "asset": "ETH"
+  }'
+```
+
+### 3. Evaluate Real-Time Entity Risk
+
+```bash
+curl http://localhost:8000/risk/0x71C...b847
+```
+
+### 4. Run Offline Forensic Batch Pipeline
+
+Analyze a transaction CSV archive and output the complete risk dossier:
 
 ```bash
 python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output
 ```
 
-### 2. Run with Synthetic Anomaly Benchmark
+### 5. Run Synthetic Anomaly Benchmark
 
-Evaluate the models against the 5-seed synthetic anomaly benchmark:
+Evaluate the models across 10 random seeds against 5 fraud archetypes:
 
 ```bash
 python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output --benchmark

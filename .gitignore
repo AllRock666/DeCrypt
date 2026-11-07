@@ -4,3 +4,7 @@ __pycache__/
 .env
 output/
 BTC data/
+*.db
+*.db-shm
+*.db-wal
+
