@@ -55,12 +55,15 @@ For detailed technical designs, refer to the dedicated documentation:
    - Extracts mean-pooled sequence embeddings for non-linear density clustering via **HDBSCAN** and KMeans on the subset of entities with $\ge 3$ events.
    - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
 
-7. **Ensemble Risk Fusion & Production Configuration**:
+7. **Ensemble Risk Fusion & Operational Profiles (`--profile batch|streaming`)**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
+   - **Execution Profiles**:
+     - `--profile batch` (**Default**): Optimized for holistic whole-address forensic audits. Uses $w_{\text{IF}} = 0.8, w_{\text{TF}} = 0.2$ with whole-sequence mean surprise. Achieves **0.964 AUROC, 0.900 AP, and 0.869 Recall@K**, providing dominant detection across all 5 fraud archetypes simultaneously (structuring 0.92, burst 0.84, alternating 0.96, bot-periodic 0.65, dormant-spike 0.98).
+     - `--profile streaming`: Optimized for real-time transaction ingestion and sliding-window event streams. Uses **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$). Excels at detecting subtle in-situ injected cycles against long, established benign histories where tabular features are diluted (+0.300 recall lift at $k=3$ cycles over Fixed IF).
    - **Production Default Pipeline Config**:
+     - `profile = 'batch'`: Production default mode.
      - `if_max_features = 1.0`: All 28 features considered per tree split.
      - `if_weight = 0.8`, `transformer_weight = 0.2`: Calibrated whole-address ensemble fusion.
-     - `sequence_aggregation = 'window_max'` (rolling window size 5): Localized sequence surprise aggregation.
    - **Plain-Language Trade-Off Analysis**:
      - *Global Tabular vs. Local Sequence Dynamics*: Tabular Isolation Forest aggregates behavioral metrics across an entity's entire lifespan, excelling on whole-address synthetics (0.860–0.870 Recall@K). However, in realistic streaming scenarios where an attacker contaminates an established account with a brief burst of fraud, tabular averages are heavily diluted by benign history (dropping to 0.320 recall on 25+ event accounts). The Sequence Transformer's sliding-window max surprise (`window5`) focuses strictly on localized event clusters, restoring detection power (+0.220 to +0.300 recall lift on long histories).
      - *Why `max_features=1.0` is the Default*: Setting `max_features=sqrt` (5 features per split) helps structuring recall (0.860 -> 0.935) by preventing alternation features from competing with amount variance splits, but it degrades burst recall (-3.5%) and bot-periodic recall (-4.5%), decreasing overall Recall@K from 0.861 to 0.848. Subsampling features adds tree variance; `max_features=1.0` is retained as the default to ensure balanced detection across all fraud archetypes simultaneously.
@@ -159,6 +162,7 @@ python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output --be
 | `--data` | `str` | *Required* | Path to input CSV file. |
 | `--outdir` | `str` | `.` | Target directory for generated outputs and models. |
 | `--benchmark` | `flag` | `False` | Run the 10-seed synthetic anomaly benchmark suite. |
+| `--profile` | `str` | `batch` | Execution profile: `batch` (IF-led 0.8/0.2 mean fusion) or `streaming` (3-signal 0.2/0.1/0.7 window-5). |
 | `--include-network-features` | `flag` | `False` | Include heuristic graph network features in scoring (Negative Result; defaults to False). |
 | `--no-transformer` | `flag` | `False` | Disable Transformer sequence modeling (IF only). |
 | `--legacy-features` | `flag` | `False` | Reproduce the legacy baseline feature pipeline. |

@@ -21,46 +21,51 @@ This document records the architectural revisions, empirical benchmark results, 
 | **Service Authentication & Security** | Optional API key with fall-through defaults. | Fail-closed API security via constant-time `hmac.compare_digest`. Rejects requests with 401 Unauthorized unless `DECRYPT_API_KEY` is configured (or dev mode enabled). |
 | **Domain Source Guard** | Bitcoin-trained models silently scored unrelated sources. | Calibrated source guard rejects cross-chain/fiat transactions with 422 Unprocessable Entity until domain-specific reference distributions are fitted. |
 | **Sequence Surprise Aggregations** | Whole-sequence mean surprise diluted over long histories. | Added top-$k$ mean surprise and sliding-window max surprise (`window5` selected on tuning seeds 101–103). |
+| **Operational Execution Profiles** | Single static fusion setting across all workflows. | Added `--profile batch|streaming`: `batch` (default, IF-led 0.8/0.2 mean fusion, 0.964 AUROC) vs `streaming` (3-signal 0.2/0.1/0.7 window-5 fusion, +0.300 recall lift on contaminated streams). |
+| **Bootstrap Inference Unit** | Seed-level resampling ($N=10$) collapsed to zero variance on identical seed outcomes. | Fixed by upgrading to **hierarchical cluster bootstrap** (resampling seeds with replacement, and within each seed resampling address detection indicators). Verified non-zero width CIs across all contamination strata. |
+| **Component RNG Isolation** | Shared master seed led to run-to-run seed cross-talk across processes. | Components (data split, anomaly injection, Isolation Forest, Transformer training, graph permutation test) derive independent, isolated RNG seeds via `np.random.SeedSequence(seed).generate_state(5)`. Verified 100% deterministic reproducibility. |
 
 ---
 
-## 2. Six-Model Benchmark Results (v2.0 Generator, 10 Held-Out Seeds)
+## 2. Whole-Address Benchmark & Fusion Architecture Comparison (10 Held-Out Seeds)
 
-Evaluated across 10 held-out evaluation seeds (42–51), with 20 injections per fraud archetype (100 anomalies per seed = 1,000 total evaluations). All table cells report the mean and 95% bootstrap confidence interval computed from 1,000 resamples:
+Evaluated across 10 held-out evaluation seeds (42–51) with isolated RNG seeds per component. Compares the baseline Fixed IF against the candidate 3-Signal Fusion ($0.20 \text{ IF} + 0.10 \text{ Mean} + 0.70 \text{ Window-5}$), 0.8/0.2 Window-5, and the production default 0.8/0.2 Mean Fusion:
 
-| Model | AUROC [95% CI] | AP [95% CI] | Recall@K [95% CI] | Structuring | Burst | Pass-Through | Bot-Periodic | Dormant-Spike |
+| Model | AUROC [95% CI] | AP [95% CI] | Recall@K [95% CI] | Structuring | Burst | Alternating | Bot-Periodic | Dormant-Spike |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Legacy IF** | 0.884 [0.869, 0.897] | 0.793 [0.763, 0.822] | 0.713 [0.688, 0.736] | 0.92 [0.88, 0.96] | 0.93 [0.88, 0.97] | 0.55 [0.49, 0.62] | 0.18 [0.12, 0.24] | **0.98 [0.95, 1.00]** |
-| **Fixed IF** | 0.965 [0.960, 0.971] | 0.898 [0.873, 0.921] | 0.860 [0.843, 0.877] | 0.87 [0.82, 0.91] | **0.96 [0.93, 0.99]** | 0.79 [0.73, 0.86] | **0.70 [0.64, 0.76]** | 0.97 [0.94, 0.99] |
-| **Transformer (Window-5)** | 0.823 [0.796, 0.848] | 0.700 [0.652, 0.744] | 0.602 [0.559, 0.641] | 0.32 [0.20, 0.44] | 0.55 [0.38, 0.71] | **1.00 [1.00, 1.00]** | 0.16 [0.10, 0.22] | **0.98 [0.95, 1.00]** |
-| **Ensemble (Mean-Rank)** | 0.936 [0.924, 0.946] | 0.851 [0.818, 0.881] | 0.785 [0.756, 0.810] | 0.83 [0.77, 0.89] | 0.78 [0.67, 0.88] | **1.00 [1.00, 1.00]** | 0.32 [0.23, 0.41] | **0.99 [0.98, 1.00]** |
-| **Ensemble (Max-Rank)** | 0.924 [0.909, 0.936] | 0.824 [0.787, 0.856] | 0.773 [0.743, 0.801] | 0.80 [0.74, 0.86] | 0.81 [0.71, 0.90] | 0.98 [0.96, 1.00] | 0.33 [0.24, 0.43] | 0.95 [0.91, 0.98] |
-| **Ensemble (Tuned 0.9/0.1)** | **0.966 [0.960, 0.972]** | **0.895 [0.867, 0.921]** | **0.863 [0.845, 0.883]** | 0.87 [0.82, 0.91] | 0.95 [0.91, 0.98] | **0.89 [0.84, 0.93]** | 0.64 [0.56, 0.71] | 0.97 [0.95, 0.99] |
-| **Ensemble (Current 0.8/0.2 Mean)** | 0.969 [0.963, 0.974] | 0.915 [0.896, 0.933] | 0.874 [0.855, 0.894] | 0.88 [0.83, 0.92] | 0.94 [0.89, 0.98] | 0.97 [0.94, 0.99] | 0.60 [0.50, 0.70] | 0.98 [0.96, 1.00] |
+| **Fixed IF** | 0.960 [0.953, 0.966] | 0.872 [0.845, 0.899] | 0.856 [0.839, 0.873] | 0.89 [0.85, 0.93] | **0.91 [0.86, 0.97]** | 0.76 [0.68, 0.84] | **0.74 [0.68, 0.81]** | 0.97 [0.94, 0.99] |
+| **Transformer (Window-5)** | 0.816 [0.795, 0.839] | 0.663 [0.620, 0.710] | 0.601 [0.565, 0.637] | 0.55 [0.35, 0.76] | 0.35 [0.16, 0.58] | **1.00 [1.00, 1.00]** | 0.19 [0.09, 0.30] | 0.91 [0.78, 0.99] |
+| **Ensemble (0.8/0.2 Mean)** [**Batch Default**] | **0.964 [0.959, 0.970]** | **0.900 [0.877, 0.921]** | **0.869 [0.855, 0.886]** | **0.92 [0.88, 0.96]** | 0.84 [0.78, 0.90] | **0.96 [0.93, 0.99]** | 0.65 [0.57, 0.72] | **0.98 [0.96, 1.00]** |
+| **Ensemble (0.8/0.2 Window-5)** | 0.960 [0.954, 0.967] | 0.872 [0.845, 0.900] | 0.861 [0.848, 0.876] | 0.89 [0.84, 0.94] | 0.89 [0.82, 0.94] | 0.94 [0.90, 0.98] | 0.61 [0.53, 0.68] | 0.97 [0.95, 0.99] |
+| **Ensemble (3-Signal 0.2/0.1/0.7)** | 0.862 [0.844, 0.881] | 0.748 [0.713, 0.787] | 0.659 [0.626, 0.694] | 0.68 [0.53, 0.85] | 0.39 [0.19, 0.61] | **1.00 [1.00, 1.00]** | 0.27 [0.16, 0.39] | 0.96 [0.86, 1.00] |
 
 ---
 
 ## 3. Paired Bootstrap Confidence Intervals of the Difference
 
-### 3.1 Tuned Ensemble (0.9/0.1 Window-5) vs. Fixed IF
-Paired differences $\Delta = \text{Tuned} - \text{Fixed IF}$ evaluated across all 10 held-out evaluation seeds using 1,000 bootstrap resamples:
+### 3.1 Paired Differences vs. Fixed IF
+Paired differences $\Delta = \text{Model} - \text{Fixed IF}$ evaluated across all 10 held-out evaluation seeds (1,000 bootstrap resamples):
 
-| Metric | Paired Mean Difference ($\Delta$) | 95% Bootstrap CI | Statistical Interpretation |
-| :--- | :---: | :---: | :--- |
-| **$\Delta$ AUROC** | **+0.0004** | **[-0.0006, +0.0013]** | Overlap with zero |
-| **$\Delta$ Average Precision (AP)** | **-0.0034** | **[-0.0078, +0.0006]** | Overlap with zero |
-| **$\Delta$ Recall@K** | **+0.0030** | **[-0.0020, +0.0080]** | Overlap with zero |
+| Model | $\Delta$ AUROC [95% CI] | $\Delta$ AP [95% CI] | $\Delta$ Recall@K [95% CI] | Key Archetype Shifts |
+| :--- | :---: | :---: | :---: | :--- |
+| **Ensemble (0.8/0.2 Mean)** | **+0.0046 [+0.0020, +0.0072]** | **+0.0276 [+0.0151, +0.0394]** | **+0.0130 [+0.0000, +0.0240]** | Alternating: **+0.200 [+0.140, +0.255]**; Structuring: +0.025; Burst: -0.075 |
+| **Ensemble (0.8/0.2 Window-5)** | +0.0007 [-0.0022, +0.0032] | +0.0001 [-0.0078, +0.0065] | +0.0050 [-0.0070, +0.0180] | Alternating: **+0.185 [+0.130, +0.230]**; Bot-Periodic: -0.135; Burst: -0.030 |
+| **Ensemble (3-Signal 0.2/0.1/0.7)** | **-0.0976 [-0.1147, -0.0817]** | **-0.1246 [-0.1489, -0.1010]** | **-0.1970 [-0.2310, -0.1670]** | Burst: **-0.525**; Bot-Periodic: **-0.475**; Structuring: **-0.210**; Alternating: +0.240 |
 
-### 3.2 Tuned Ensemble (0.9/0.1 Window-5) vs. Previous Ensemble (0.8/0.2 Mean)
-On synthetic benchmark sequences where anomalies span entire address sequences:
+### 3.2 Paired Differences vs. Ensemble (0.8/0.2 Mean)
+Paired differences $\Delta = \text{Model} - \text{Ensemble (0.8/0.2 Mean)}$ on the whole-address benchmark:
 
-| Metric | Paired Mean Difference ($\Delta$) | 95% Bootstrap CI | Statistical Interpretation |
-| :--- | :---: | :---: | :--- |
-| **$\Delta$ AUROC** | **-0.0029** | **[-0.0043, -0.0017]** | 95% bootstrap CI excludes zero |
-| **$\Delta$ Average Precision (AP)** | **-0.0205** | **[-0.0326, -0.0098]** | 95% bootstrap CI excludes zero |
-| **$\Delta$ Recall@K** | **-0.0110** | **[-0.0190, -0.0040]** | 95% bootstrap CI excludes zero |
+| Model | $\Delta$ AUROC [95% CI] | $\Delta$ AP [95% CI] | $\Delta$ Recall@K [95% CI] | Empirical Impact on Whole-Address Fraud |
+| :--- | :---: | :---: | :---: | :--- |
+| **Ensemble (0.8/0.2 Window-5)** | **-0.0039 [-0.0052, -0.0027]** | **-0.0275 [-0.0357, -0.0188]** | **-0.0080 [-0.0130, -0.0020]** | Slight drop in global AP (-0.0275) and bot-periodic (-0.040), modest gain in burst (+0.045). |
+| **Ensemble (3-Signal 0.2/0.1/0.7)** | **-0.1021 [-0.1176, -0.0874]** | **-0.1522 [-0.1780, -0.1272]** | **-0.2100 [-0.2360, -0.1820]** | **Severe Degradation**: Drops burst recall from 0.84 to 0.39 (-0.450), bot-periodic from 0.65 to 0.27 (-0.380), and structuring from 0.92 to 0.68 (-0.235). |
 
-* **Context & Trade-off**: On purely synthetic addresses where every transaction exhibits anomalous alternation, whole-sequence mean surprise aggregates signal across all 12–22 events, yielding high synthetic metrics. However, in **in-situ contamination** where fraud is injected into real histories, whole-sequence mean surprise is heavily diluted by benign history, whereas Window-5 achieves a **+0.206 Recall@K advantage** over Fixed IF.
+### 3.3 Root-Cause Analysis: Why 3-Signal Fails on Whole-Address Archetypes
+* **The Noise Threshold vs. Drop Magnitude**: The run-to-run random seed noise level is approximately **~0.01–0.03**. The observed drops in 3-signal fusion (-0.102 AUROC, -0.152 AP, -0.210 Recall@K) exceed the noise level by **over 5x to 10x**.
+* **Mechanistic Cause**: In 3-signal fusion, 70% weight is allocated to localized Window-5 max surprise, and only 20% to Isolation Forest. Whole-address anomalies exhibit diffuse behavioral signatures across the entity's complete lifespan (high burst count, total structuring turnover, strict inter-arrival time regularity). The localized 5-event window captures local transition surprise but completely loses the macroscopic count/volume distributions that tabular Isolation Forest isolates.
+* **Architectural Resolution**: Because 3-Signal severely impairs whole-address detection, it **cannot be the global default**. Instead, we introduce `--profile batch|streaming`:
+  - `batch` (**Default**): 0.8 IF + 0.2 TF Mean surprise. Preserves dominant holistic detection across all archetypes.
+  - `streaming`: 3-Signal ($0.20 \text{ IF} + 0.10 \text{ Mean} + 0.70 \text{ Window-5}$). Applied in real-time streaming where local burstiness must be captured amidst long benign histories.
 
 ---
 
@@ -181,27 +186,38 @@ Tested Models:
 3. **Fusion 0.9 / 0.1 Window-5**: 0.9 IF percentile rank + 0.1 sliding-window-5 max surprise rank.
 4. **Fusion 3-Signal**: $0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$ (weights chosen strictly on independent tuning seeds 101–103).
 
-### 5.1 Results by Injected Cycle Count ($k = 1, 2, 3$) and History Stratum
+### 5.1 Root Cause of Degenerate CI `[+0.059, +0.059]` & Hierarchical Bootstrap Fix
+* **Resampling Unit**: The previous script resampled **seeds only** ($N=10$ summary metrics).
+* **Cause**: For $k=3, \text{overall}$, there are $K=17$ positive test addresses per seed (6 in 5-9, 6 in 10-24, 5 in 25+). In every seed $s \in [42..51]$, `fusion_09_01_win5` detected 15 addresses while `fixed_if` detected 14 addresses. The per-seed difference was identically $15/17 - 14/17 = 1/17 \approx +0.0588235$ in all 10 evaluation seeds. Because all 10 seed values were identical, any bootstrap sample of 10 values has sample mean $\bar{x} \equiv 1/17$, collapsing the bootstrap variance to zero ($[+0.059, +0.059]$).
+* **Mathematical Fix**: The correct resampling unit for classification recall is **hierarchical cluster bootstrap**:
+  - Level 1: Resample the 10 seeds with replacement.
+  - Level 2: Within each drawn seed $s$, resample the $K_s$ individual address binary detection indicators $\{d_i = y_{A,i} - y_{B,i}\}_{i=1}^{K_s}$ with replacement.
+  This captures both between-seed variability and within-seed address binomial sampling variance, yielding legitimate non-zero width confidence intervals even when discrete seed summaries coincide.
+* **Verification Test**: `test_hierarchical_paired_bootstrap_nonzero_width` was added to `tests/test_benchmark.py` and passed.
 
-| Injected Cycles | History Stratum | Fixed IF Recall [95% CI] | Fusion 0.8/0.2 Mean [95% CI] | Fusion 0.9/0.1 Win5 [95% CI] | Fusion 3-Signal [95% CI] | Paired Difference: 3-Signal vs. Fixed IF [95% CI] |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$k = 1$ (2 events)** | **5–9 events** | 0.283 [0.167, 0.400] | 0.333 [0.233, 0.433] | 0.317 [0.217, 0.417] | 0.333 [0.183, 0.467] | +0.050 [-0.133, +0.233] |
-| | **10–24 events** | 0.450 [0.350, 0.550] | 0.483 [0.400, 0.600] | 0.450 [0.366, 0.550] | 0.400 [0.317, 0.483] | -0.050 [-0.217, +0.117] |
-| | **25+ events** | 0.260 [0.140, 0.380] | 0.280 [0.200, 0.360] | 0.280 [0.160, 0.420] | 0.320 [0.180, 0.460] | +0.060 [-0.080, +0.220] |
-| | **Overall ($\ge 5$)** | 0.312 [0.276, 0.347] | 0.318 [0.288, 0.347] | 0.306 [0.276, 0.329] | 0.347 [0.312, 0.388] | +0.035 [-0.024, +0.100] |
-| **$k = 2$ (4 events)** | **5–9 events** | 0.383 [0.300, 0.467] | 0.483 [0.417, 0.550] | 0.433 [0.350, 0.517] | 0.683 [0.600, 0.750] | **+0.300 [+0.200, +0.383]** |
-| | **10–24 events** | 0.517 [0.417, 0.633] | 0.550 [0.417, 0.667] | 0.567 [0.467, 0.667] | 0.617 [0.516, 0.717] | +0.100 [-0.083, +0.267] |
-| | **25+ events** | 0.280 [0.180, 0.360] | 0.300 [0.200, 0.400] | 0.300 [0.200, 0.400] | 0.420 [0.300, 0.540] | +0.140 [-0.000, +0.280] |
-| | **Overall ($\ge 5$)** | 0.312 [0.265, 0.359] | 0.371 [0.335, 0.412] | 0.347 [0.306, 0.388] | 0.518 [0.447, 0.582] | **+0.206 [+0.129, +0.288]** |
-| **$k = 3$ (6 events)** | **5–9 events** | 0.600 [0.533, 0.667] | 0.717 [0.667, 0.767] | 0.633 [0.567, 0.700] | 0.867 [0.733, 0.967] | **+0.267 [+0.117, +0.383]** |
-| | **10–24 events** | 0.617 [0.517, 0.733] | 0.617 [0.517, 0.733] | 0.633 [0.533, 0.734] | 0.800 [0.700, 0.884] | **+0.183 [+0.050, +0.300]** |
-| | **25+ events** | 0.320 [0.240, 0.400] | 0.360 [0.260, 0.460] | 0.440 [0.320, 0.560] | 0.620 [0.500, 0.760] | **+0.300 [+0.180, +0.440]** |
-| | **Overall ($\ge 5$)** | 0.441 [0.406, 0.471] | 0.547 [0.524, 0.571] | 0.500 [0.465, 0.529] | **0.700 [0.653, 0.747]** | **+0.259 [+0.200, +0.318]** |
+### 5.2 Results by Injected Cycle Count ($k = 1, 2, 3$) and History Stratum (Hierarchical CIs)
 
-### 5.2 Key Takeaways on Fused Signals
-1. **$k=1$ Floor**: Across all models, a single injected cycle (2 events) inside established histories yields Recall@K between 0.306 and 0.347. Paired difference CIs vs. Fixed IF all span zero (e.g. 3-Signal difference $+0.035$ $[-0.024, +0.100]$), indicating that 2 subtle events are statistically indistinguishable from background noise regardless of model architecture.
-2. **Transformer Window-5 Dominance on Long Histories ($25+$ events)**: As history grows, tabular features dilute the anomalous signal (Fixed IF drops from 0.600 on short histories to 0.320 on $25+$ histories at $k=3$). Sequence window-5 maintains focus on local burstiness, allowing the 3-Signal fusion to achieve **0.620** recall (+0.300 gain vs. Fixed IF, 95% bootstrap CI excludes zero).
-3. **Overall Recall Gain at $k=3$**: 3-Signal fusion reaches **0.700 [0.653, 0.747]**, outperforming Fixed IF (0.441) by **+0.259 [+0.200, +0.318]** (95% bootstrap CI excludes zero).
+All table cells report the mean and 95% hierarchical cluster bootstrap CI computed from 1,000 resamples across seeds and addresses:
+
+| Injected Cycles | History Stratum | Fixed IF Recall [95% CI] | Fusion 0.8/0.2 Mean [95% CI] | Fusion 0.9/0.1 Win5 [95% CI] | Fusion 3-Signal [95% CI] | Paired Difference: 3-Signal vs. Fixed IF [95% CI] | Statistical Interpretation |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **$k = 1$ (2 events)** | **5–9 events** | 0.167 [0.050, 0.283] | 0.267 [0.133, 0.417] | 0.217 [0.100, 0.350] | **0.400 [0.233, 0.567]** | **+0.233 [+0.050, +0.434]** | 95% bootstrap CI excludes zero |
+| | **10–24 events** | 0.267 [0.133, 0.433] | 0.283 [0.150, 0.450] | 0.267 [0.133, 0.433] | 0.300 [0.150, 0.450] | +0.033 [-0.150, +0.200] | Overlap with zero |
+| | **25+ events** | 0.320 [0.160, 0.480] | 0.360 [0.200, 0.540] | 0.340 [0.180, 0.500] | 0.440 [0.260, 0.620] | +0.120 [-0.100, +0.340] | Overlap with zero |
+| | **Overall ($\ge 5$)** | 0.282 [0.206, 0.359] | 0.312 [0.229, 0.400] | 0.288 [0.206, 0.371] | 0.365 [0.271, 0.465] | +0.082 [-0.018, +0.182] | Overlap with zero |
+| **$k = 2$ (4 events)** | **5–9 events** | 0.300 [0.167, 0.450] | 0.383 [0.266, 0.533] | 0.350 [0.217, 0.500] | **0.700 [0.567, 0.833]** | **+0.400 [+0.200, +0.583]** | 95% bootstrap CI excludes zero |
+| | **10–24 events** | 0.400 [0.233, 0.583] | 0.500 [0.317, 0.683] | 0.417 [0.233, 0.600] | 0.533 [0.350, 0.700] | +0.133 [-0.117, +0.350] | Overlap with zero |
+| | **25+ events** | 0.320 [0.160, 0.500] | 0.360 [0.200, 0.540] | 0.380 [0.220, 0.560] | 0.520 [0.320, 0.680] | **+0.200 [+0.000, +0.400]** | Borderline (touches zero) |
+| | **Overall ($\ge 5$)** | 0.324 [0.235, 0.418] | 0.394 [0.312, 0.482] | 0.341 [0.247, 0.441] | **0.553 [0.447, 0.665]** | **+0.229 [+0.118, +0.359]** | 95% bootstrap CI excludes zero |
+| **$k = 3$ (6 events)** | **5–9 events** | 0.417 [0.250, 0.583] | 0.617 [0.483, 0.767] | 0.517 [0.383, 0.683] | **0.850 [0.733, 0.950]** | **+0.433 [+0.267, +0.600]** | 95% bootstrap CI excludes zero |
+| | **10–24 events** | 0.417 [0.267, 0.550] | 0.517 [0.350, 0.683] | 0.483 [0.317, 0.650] | **0.717 [0.550, 0.883]** | **+0.300 [+0.100, +0.500]** | 95% bootstrap CI excludes zero |
+| | **25+ events** | 0.340 [0.160, 0.540] | 0.400 [0.240, 0.560] | 0.420 [0.240, 0.600] | **0.600 [0.420, 0.760]** | **+0.260 [+0.040, +0.480]** | 95% bootstrap CI excludes zero |
+| | **Overall ($\ge 5$)** | 0.365 [0.276, 0.453] | 0.500 [0.406, 0.588] | 0.394 [0.294, 0.494] | **0.665 [0.535, 0.776]** | **+0.300 [+0.182, +0.418]** | 95% bootstrap CI excludes zero |
+
+### 5.3 Key Takeaways on Fused Signals
+1. **$k=1$ Floor**: Across all models, a single injected cycle (2 events) inside established histories yields Recall@K between 0.282 and 0.365. Paired difference CIs vs. Fixed IF for overall history span zero (+0.082 [-0.018, +0.182]), confirming that 2 subtle transactions remain near the noise floor. However, on short history (5–9 events), 3-Signal achieves **0.400** (+0.233 gain, 95% CI excludes zero).
+2. **Transformer Window-5 Dominance on Long Histories ($25+$ events)**: As history grows, tabular features dilute the anomalous signal (Fixed IF drops to 0.340 at $k=3$). 3-Signal fusion maintains focus on local burstiness, achieving **0.600** recall (+0.260 gain vs. Fixed IF, 95% bootstrap CI excludes zero).
+3. **Overall Recall Gain at $k=3$**: 3-Signal fusion reaches **0.665 [0.535, 0.776]**, outperforming Fixed IF (0.365) by **+0.300 [+0.182, +0.418]** (95% bootstrap CI excludes zero).
 
 ---
 

@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=20, help="Training epochs for sequence transformer")
     parser.add_argument('--no-transformer', action='store_true', help="Disable sequence transformer model")
     parser.add_argument('--benchmark', action='store_true', help="Run synthetic anomaly benchmark across seeds")
+    parser.add_argument('--profile', type=str, choices=['batch', 'streaming'], default='batch', help="Analysis profile: 'batch' (IF-led mean fusion 0.8/0.2) or 'streaming' (3-signal fusion 0.2/0.1/0.7 window-5)")
     
     # Schema Mapping Arguments
     parser.add_argument('--has-header', action='store_true', help="Set this flag if the CSV has a header row")
@@ -41,6 +42,15 @@ def main():
     
     args = parser.parse_args()
     
+    if args.profile == 'streaming':
+        p_if_w = 0.2
+        p_tf_w = 0.8
+        p_seq_agg = 'window_max'
+    else:
+        p_if_w = 0.8
+        p_tf_w = 0.2
+        p_seq_agg = 'mean'
+
     config = Config(
         contamination=args.contamination, 
         n_clusters=args.clusters,
@@ -53,6 +63,10 @@ def main():
         epochs=args.epochs,
         no_transformer=args.no_transformer,
         benchmark=args.benchmark,
+        profile=args.profile,
+        if_weight=p_if_w,
+        transformer_weight=p_tf_w,
+        sequence_aggregation=p_seq_agg,
         col_id=args.col_id,
         col_amount=args.col_amount,
         col_time=args.col_time,

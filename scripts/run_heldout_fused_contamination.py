@@ -10,7 +10,7 @@ from sklearn.ensemble import IsolationForest
 from decrypt.config import Config
 from decrypt.features import extract_all_features, prepare_numeric_features
 from decrypt.sequence import SequenceAnomalyDetector, extract_address_events, MAX_SEQ_LEN, MASK_DIR, MASK_AMT_BIN, MASK_DT_BIN, MASK_HOUR, MASK_DOW
-from decrypt.benchmark import compute_bootstrap_ci, compute_paired_bootstrap_ci, inject_alternating_cycles
+from decrypt.benchmark import compute_hierarchical_bootstrap_ci, compute_hierarchical_paired_ci, inject_alternating_cycles
 import torch
 import torch.nn as nn
 
@@ -29,7 +29,8 @@ def run_fused_contamination_evaluation(eval_seeds=[42, 43, 44, 45, 46, 47, 48, 4
     w_mean_3s = 0.10
     w_win5_3s = 0.70
     
-    runs = {s: {k: {st: {} for st in strata_names} for k in [1, 2, 3]} for s in eval_seeds}
+    # Track per-address binary detection indicators: indicators[k][st][m_name][s] = [0, 1, 1, ...]
+    indicators = {k: {st: {m: {} for m in models} for st in strata_names} for k in [1, 2, 3]}
     
     pos_amounts = df['amount'].abs().values
     pos_amounts = pos_amounts[pos_amounts > 0]
@@ -40,9 +41,16 @@ def run_fused_contamination_evaluation(eval_seeds=[42, 43, 44, 45, 46, 47, 48, 4
     
     for s in eval_seeds:
         print(f"\n--- Running Evaluation Seed {s} ---")
-        rng = np.random.default_rng(s)
-        real_addresses = np.array(list(df['address_id'].unique()))
-        rng.shuffle(real_addresses)
+        ss = np.random.SeedSequence(s)
+        child_seeds = ss.generate_state(5)
+        seed_split = int(child_seeds[0]) % (2**31 - 1)
+        seed_injection = int(child_seeds[1]) % (2**31 - 1)
+        seed_if = int(child_seeds[2]) % (2**31 - 1)
+        seed_tf = int(child_seeds[3]) % (2**31 - 1)
+        
+        rng_split = np.random.default_rng(seed_split)
+        real_addresses = np.sort(df['address_id'].unique())
+        rng_split.shuffle(real_addresses)
         
         split_idx = int(len(real_addresses) * 0.70)
         train_addrs = set(real_addresses[:split_idx])
@@ -51,13 +59,13 @@ def run_fused_contamination_evaluation(eval_seeds=[42, 43, 44, 45, 46, 47, 48, 4
         train_df = df[df['address_id'].isin(train_addrs)].copy()
         test_real_df = df[df['address_id'].isin(test_real_addrs)].copy()
         
-        cfg = Config(include_network_features=False, epochs=15, seed=s, random_state=s, contamination=0.1)
+        cfg = Config(include_network_features=False, epochs=15, seed=seed_tf, random_state=seed_tf, contamination=0.1)
         
         # Train Fixed IF
         train_feats, _ = extract_all_features(train_df, cfg)
         num_train = prepare_numeric_features(train_feats)
         scaler = StandardScaler().fit(num_train)
-        if_model = IsolationForest(contamination=0.1, random_state=s).fit(scaler.transform(num_train))
+        if_model = IsolationForest(contamination=0.1, random_state=seed_if).fit(scaler.transform(num_train))
         
         # Train TF
         tf_detector = SequenceAnomalyDetector(cfg)
@@ -66,33 +74,34 @@ def run_fused_contamination_evaluation(eval_seeds=[42, 43, 44, 45, 46, 47, 48, 4
         
         test_counts = test_real_df.groupby('address_id').size()
         strata_addrs = {
-            '5-9': list(test_counts[(test_counts >= 5) & (test_counts <= 9)].index),
-            '10-24': list(test_counts[(test_counts >= 10) & (test_counts <= 24)].index),
-            '25+': list(test_counts[test_counts >= 25].index),
-            'overall': list(test_counts[test_counts >= 5].index)
+            '5-9': sorted(list(test_counts[(test_counts >= 5) & (test_counts <= 9)].index)),
+            '10-24': sorted(list(test_counts[(test_counts >= 10) & (test_counts <= 24)].index)),
+            '25+': sorted(list(test_counts[test_counts >= 25].index)),
+            'overall': sorted(list(test_counts[test_counts >= 5].index))
         }
         
+        rng_inj = np.random.default_rng(seed_injection)
         chosen_by_stratum = {}
         for st, count in [('5-9', 6), ('10-24', 6), ('25+', 5)]:
             avail = strata_addrs[st]
             n_pick = min(count, len(avail))
-            chosen_by_stratum[st] = list(rng.choice(avail, size=n_pick, replace=False))
+            chosen_by_stratum[st] = sorted(list(rng_inj.choice(avail, size=n_pick, replace=False)))
             
         all_chosen = []
-        for c in chosen_by_stratum.values():
+        for c in [chosen_by_stratum['5-9'], chosen_by_stratum['10-24'], chosen_by_stratum['25+']]:
             all_chosen.extend(c)
-        chosen_by_stratum['overall'] = all_chosen
+        chosen_by_stratum['overall'] = sorted(all_chosen)
         
         for k in [1, 2, 3]:
             contam_records = []
-            for addr in test_real_addrs:
+            for addr in sorted(list(test_real_addrs)):
                 addr_txs = test_real_df[test_real_df['address_id'] == addr].copy()
                 if addr in all_chosen:
-                    addr_txs = inject_alternating_cycles(addr_txs, k=k, pos_amounts=pos_amounts, rng=rng)
+                    addr_txs = inject_alternating_cycles(addr_txs, k=k, pos_amounts=pos_amounts, rng=rng_inj)
                 contam_records.append(addr_txs)
                 
             eval_df = pd.concat(contam_records, ignore_index=True).sort_values(['address_id', 'timestamp'])
-            all_eval_addrs = list(test_real_addrs)
+            all_eval_addrs = sorted(list(test_real_addrs))
             
             # Score Fixed IF
             test_feats, _ = extract_all_features(eval_df, cfg)
@@ -216,25 +225,25 @@ def run_fused_contamination_evaluation(eval_seeds=[42, 43, 44, 45, 46, 47, 48, 4
                 if K == 0 or len(pool) == 0:
                     continue
                     
-                def eval_recall(s_dict):
+                def get_address_indicators(s_dict):
                     sorted_pool = sorted(pool, key=lambda a: s_dict.get(a, -1e9), reverse=True)
                     top_k_set = set(sorted_pool[:K])
-                    return len(set(positives) & top_k_set) / K
+                    return [1 if a in top_k_set else 0 for a in positives]
                     
                 for m_name in models:
-                    runs[s][k][st][m_name] = eval_recall(score_dicts[m_name])
+                    indicators[k][st][m_name][s] = get_address_indicators(score_dicts[m_name])
                     
-    return runs
+    return indicators
 
 if __name__ == '__main__':
     seeds = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
-    runs = run_fused_contamination_evaluation(eval_seeds=seeds)
+    indicators = run_fused_contamination_evaluation(eval_seeds=seeds)
     
     strata = ['5-9', '10-24', '25+', 'overall']
     models = ['fixed_if', 'fusion_08_02_mean', 'fusion_09_01_win5', 'fusion_3signal']
     
     print("\n" + "="*120)
-    print("FUSED IN-SITU CONTAMINATION TEST RESULTS (10 EVALUATION SEEDS) WITH PAIRED BOOTSTRAP CIs")
+    print("FUSED IN-SITU CONTAMINATION TEST RESULTS (HIERARCHICAL SEED & ADDRESS BOOTSTRAP CIs)")
     print("="*120)
     
     report_dict = {}
@@ -242,19 +251,19 @@ if __name__ == '__main__':
         print(f"\n==================== Injected Alternating Cycles k = {k} ({2*k} events) ====================")
         report_dict[str(k)] = {}
         for st in strata:
-            vals_if = [runs[s][k][st]['fixed_if'] for s in seeds]
-            vals_08_02 = [runs[s][k][st]['fusion_08_02_mean'] for s in seeds]
-            vals_09_01 = [runs[s][k][st]['fusion_09_01_win5'] for s in seeds]
-            vals_3s = [runs[s][k][st]['fusion_3signal'] for s in seeds]
+            ind_if = indicators[k][st]['fixed_if']
+            ind_08_02 = indicators[k][st]['fusion_08_02_mean']
+            ind_09_01 = indicators[k][st]['fusion_09_01_win5']
+            ind_3s = indicators[k][st]['fusion_3signal']
             
-            ci_if = compute_bootstrap_ci(vals_if)
-            ci_08_02 = compute_bootstrap_ci(vals_08_02)
-            ci_09_01 = compute_bootstrap_ci(vals_09_01)
-            ci_3s = compute_bootstrap_ci(vals_3s)
+            ci_if = compute_hierarchical_bootstrap_ci(ind_if)
+            ci_08_02 = compute_hierarchical_bootstrap_ci(ind_08_02)
+            ci_09_01 = compute_hierarchical_bootstrap_ci(ind_09_01)
+            ci_3s = compute_hierarchical_bootstrap_ci(ind_3s)
             
-            diff_08_02 = compute_paired_bootstrap_ci(vals_08_02, vals_if)
-            diff_09_01 = compute_paired_bootstrap_ci(vals_09_01, vals_if)
-            diff_3s = compute_paired_bootstrap_ci(vals_3s, vals_if)
+            diff_08_02 = compute_hierarchical_paired_ci(ind_08_02, ind_if)
+            diff_09_01 = compute_hierarchical_paired_ci(ind_09_01, ind_if)
+            diff_3s = compute_hierarchical_paired_ci(ind_3s, ind_if)
             
             report_dict[str(k)][st] = {
                 'fixed_if': ci_if,
@@ -274,18 +283,19 @@ if __name__ == '__main__':
             
     val_file = Path('output/validation_controls.json')
     if val_file.exists():
-        with open(val_file, 'r') as f:
+        with open(val_file, 'r', encoding='utf-8') as f:
             full_val = json.load(f)
     else:
         full_val = {}
         
     full_val['fused_contamination_heldout_paired_cis'] = {
-        'description': 'Stratum-conditioned Recall@K for in-situ contamination (k=1,2,3 cycles) on 10 held-out evaluation seeds with FUSED models',
+        'description': 'Stratum-conditioned Recall@K for in-situ contamination (k=1,2,3 cycles) on 10 held-out evaluation seeds with FUSED models and Hierarchical (seed & address) Bootstrap CIs',
+        'bootstrap_method': 'hierarchical_cluster_bootstrap (resampling seeds with replacement, and within each seed, resampling address binary detection indicators)',
         'tuning_seeds': [101, 102, 103],
         'fusion_3signal_weights': {'w_if': 0.20, 'w_mean': 0.10, 'w_win5': 0.70},
         'eval_seeds': seeds,
         'results_by_cycle': report_dict
     }
-    with open(val_file, 'w') as f:
+    with open(val_file, 'w', encoding='utf-8') as f:
         json.dump(full_val, f, indent=2)
-    print(f"\nSaved fused held-out contamination results to {val_file}")
+    print(f"\nSaved fused held-out contamination results with hierarchical CIs to {val_file}")

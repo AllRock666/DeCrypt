@@ -156,10 +156,11 @@ class AddressSequenceDataset(Dataset):
     """
     PyTorch Dataset for masked event modeling training.
     """
-    def __init__(self, address_keys: List[str], events_by_address: Dict[str, Dict[str, Any]], mask_prob: float = 0.15):
+    def __init__(self, address_keys: List[str], events_by_address: Dict[str, Dict[str, Any]], mask_prob: float = 0.15, seed: int = 42):
         self.address_keys = address_keys
         self.events_by_address = events_by_address
         self.mask_prob = mask_prob
+        self.rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.address_keys)
@@ -184,11 +185,11 @@ class AddressSequenceDataset(Dataset):
         target_amt_bin = amt_bin_seq.copy()
         target_dt_bin = dt_bin_seq.copy()
         
-        # 15% random masking
-        mask = np.random.rand(seq_len) < self.mask_prob
+        # 15% random masking using instance RNG
+        mask = self.rng.random(seq_len) < self.mask_prob
         # Ensure at least 1 token is masked if length > 1
         if seq_len > 1 and not mask.any():
-            mask[np.random.randint(0, seq_len)] = True
+            mask[self.rng.integers(0, seq_len)] = True
             
         masked_dir = dir_seq.copy()
         masked_amt_bin = amt_bin_seq.copy()
@@ -278,6 +279,8 @@ class SequenceAnomalyDetector:
     """
     def __init__(self, config: Config):
         self.config = config
+        torch.manual_seed(self.config.seed)
+        np.random.seed(self.config.seed)
         self.model = EventTransformerModel(d_model=64, n_heads=4, num_layers=2, dropout=0.1)
         self.amt_edges: List[float] = []
         self.dt_edges: List[float] = []
@@ -294,20 +297,23 @@ class SequenceAnomalyDetector:
         events_by_address = extract_address_events(df, self.amt_edges, self.dt_edges)
         
         # Filter addresses with at least min_seq_len events for training
-        valid_addrs = [k for k, v in events_by_address.items() if v['length'] >= self.config.min_seq_len]
+        valid_addrs = sorted([k for k, v in events_by_address.items() if v['length'] >= self.config.min_seq_len])
         if len(valid_addrs) < 10:
             logger.warning("Fewer than 10 addresses with sufficient history. Skipping Transformer training.")
             return {'trained': False}
             
-        np.random.shuffle(valid_addrs)
+        rng_fit = np.random.default_rng(self.config.seed)
+        rng_fit.shuffle(valid_addrs)
         val_size = max(1, int(len(valid_addrs) * 0.10))
         train_addrs = valid_addrs[val_size:]
         val_addrs = valid_addrs[:val_size]
         
-        train_dataset = AddressSequenceDataset(train_addrs, events_by_address, mask_prob=0.15)
-        val_dataset = AddressSequenceDataset(val_addrs, events_by_address, mask_prob=0.15)
+        train_dataset = AddressSequenceDataset(train_addrs, events_by_address, mask_prob=0.15, seed=self.config.seed)
+        val_dataset = AddressSequenceDataset(val_addrs, events_by_address, mask_prob=0.15, seed=self.config.seed + 1)
         
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate_fn)
+        g_train = torch.Generator()
+        g_train.manual_seed(self.config.seed)
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate_fn, generator=g_train)
         val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
         
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-3, weight_decay=1e-2)
@@ -694,18 +700,39 @@ def compute_ensemble_scores(
     elif valid_mask.sum() == 1:
         df.loc[valid_mask, 'transformer_risk_score'] = 50.0
         
-    # Ensemble combination
-    w_if = config.if_weight
-    w_tf = config.transformer_weight
-    total_w = w_if + w_tf
-    w_if /= total_w
-    w_tf /= total_w
-    
-    ensemble_vals = np.where(
-        df['insufficient_history'],
-        df['if_risk_score'],
-        w_if * df['if_risk_score'] + w_tf * df['transformer_risk_score']
-    )
+    # Ensemble combination based on config profile
+    if getattr(config, 'profile', 'batch') == 'streaming':
+        # Streaming profile: 3-Signal Fusion (0.20 IF + 0.10 TF Mean + 0.70 TF Window-5)
+        # Compute percentile ranks for both mean and window_max
+        tf_mean_scores = tf_surprise_df['transformer_surprise_mean'].reindex(df.index).fillna(0.0) if 'transformer_surprise_mean' in tf_surprise_df.columns else df['transformer_surprise']
+        tf_win5_scores = tf_surprise_df['transformer_surprise_window_max'].reindex(df.index).fillna(0.0) if 'transformer_surprise_window_max' in tf_surprise_df.columns else df['transformer_surprise']
+        
+        tf_mean_risk = np.zeros(len(df))
+        tf_win5_risk = np.zeros(len(df))
+        if valid_mask.sum() > 1:
+            r_m = rankdata(tf_mean_scores.loc[valid_mask].values, method='average')
+            tf_mean_risk[valid_mask] = (r_m - 1.0) / (len(r_m) - 1.0) * 100.0
+            r_w = rankdata(tf_win5_scores.loc[valid_mask].values, method='average')
+            tf_win5_risk[valid_mask] = (r_w - 1.0) / (len(r_w) - 1.0) * 100.0
+            
+        ensemble_vals = np.where(
+            df['insufficient_history'],
+            df['if_risk_score'],
+            0.20 * df['if_risk_score'] + 0.10 * tf_mean_risk + 0.70 * tf_win5_risk
+        )
+    else:
+        # Batch profile: IF-led mean fusion (0.80 IF + 0.20 TF Mean)
+        w_if = config.if_weight
+        w_tf = config.transformer_weight
+        total_w = w_if + w_tf
+        w_if /= total_w
+        w_tf /= total_w
+        
+        ensemble_vals = np.where(
+            df['insufficient_history'],
+            df['if_risk_score'],
+            w_if * df['if_risk_score'] + w_tf * df['transformer_risk_score']
+        )
     
     # Final rank-based calibration to 0-100
     n = len(ensemble_vals)

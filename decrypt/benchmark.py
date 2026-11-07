@@ -45,6 +45,95 @@ def compute_paired_bootstrap_ci(a: List[float], b: List[float], n_boot: int = 10
     diffs = [float(x - y) for x, y in zip(a, b)]
     return compute_bootstrap_ci(diffs, n_boot=n_boot, ci=ci, seed=seed)
 
+def compute_hierarchical_bootstrap_ci(
+    seed_addr_outcomes: Dict[Any, List[int]],
+    n_boot: int = 1000,
+    ci: float = 0.95,
+    seed: int = 42
+) -> Dict[str, float]:
+    """
+    Computes mean and 95% bootstrap confidence interval using hierarchical cluster bootstrap.
+    Resamples seeds (clusters) with replacement, and within each drawn seed, resamples
+    individual address detection indicators with replacement.
+    Prevents variance collapse when per-seed summary averages coincide.
+    """
+    rng = np.random.default_rng(seed)
+    seeds = list(seed_addr_outcomes.keys())
+    all_vals = np.concatenate([seed_addr_outcomes[s] for s in seeds]) if seeds else np.array([])
+    if len(all_vals) == 0:
+        return {'mean': 0.0, 'ci_lower': 0.0, 'ci_upper': 0.0, 'std': 0.0}
+    mean_val = float(np.mean(all_vals))
+    
+    boot_means = []
+    for _ in range(n_boot):
+        sampled_seeds = rng.choice(seeds, size=len(seeds), replace=True)
+        boot_vals = []
+        for s in sampled_seeds:
+            v = seed_addr_outcomes[s]
+            if len(v) > 0:
+                boot_vals.append(rng.choice(v, size=len(v), replace=True))
+        if boot_vals:
+            boot_means.append(np.mean(np.concatenate(boot_vals)))
+        else:
+            boot_means.append(mean_val)
+            
+    alpha = (1.0 - ci) / 2.0
+    lower = float(np.percentile(boot_means, alpha * 100))
+    upper = float(np.percentile(boot_means, (1.0 - alpha) * 100))
+    return {
+        'mean': mean_val,
+        'ci_lower': lower,
+        'ci_upper': upper,
+        'std': float(np.std(boot_means))
+    }
+
+def compute_hierarchical_paired_ci(
+    outcomes_a: Dict[Any, List[int]],
+    outcomes_b: Dict[Any, List[int]],
+    n_boot: int = 1000,
+    ci: float = 0.95,
+    seed: int = 42
+) -> Dict[str, float]:
+    """
+    Computes mean and 95% bootstrap confidence interval of paired difference (a - b)
+    using hierarchical cluster bootstrap (level 1 = seeds, level 2 = positive address indicators).
+    """
+    rng = np.random.default_rng(seed)
+    seeds = list(outcomes_a.keys())
+    diffs = {}
+    for s in seeds:
+        a_arr = np.array(outcomes_a[s])
+        b_arr = np.array(outcomes_b[s])
+        diffs[s] = a_arr - b_arr
+        
+    all_diffs = np.concatenate([diffs[s] for s in seeds]) if seeds else np.array([])
+    if len(all_diffs) == 0:
+        return {'mean': 0.0, 'ci_lower': 0.0, 'ci_upper': 0.0, 'std': 0.0}
+    mean_val = float(np.mean(all_diffs))
+    
+    boot_means = []
+    for _ in range(n_boot):
+        sampled_seeds = rng.choice(seeds, size=len(seeds), replace=True)
+        boot_diffs = []
+        for s in sampled_seeds:
+            d = diffs[s]
+            if len(d) > 0:
+                boot_diffs.append(rng.choice(d, size=len(d), replace=True))
+        if boot_diffs:
+            boot_means.append(np.mean(np.concatenate(boot_diffs)))
+        else:
+            boot_means.append(mean_val)
+            
+    alpha = (1.0 - ci) / 2.0
+    lower = float(np.percentile(boot_means, alpha * 100))
+    upper = float(np.percentile(boot_means, (1.0 - alpha) * 100))
+    return {
+        'mean': mean_val,
+        'ci_lower': lower,
+        'ci_upper': upper,
+        'std': float(np.std(boot_means))
+    }
+
 def run_graph_sanity_test(df: pd.DataFrame, config: Config, n_runs: int = 20, seed: int = 42) -> Dict[str, Any]:
     """
     Evaluates the heuristic flow graph against null permutation models:
@@ -343,11 +432,27 @@ def run_single_seed_benchmark(
     w_tf: float = 0.2
 ) -> Dict[str, Any]:
     """
-    Evaluates Legacy IF, Fixed IF, Transformer, Mean-Rank, Max-Rank, and Tuned Weighted Fusion.
+    Evaluates Legacy IF, Fixed IF, Transformer, Mean-Rank, Max-Rank, 0.8/0.2 Mean,
+    0.8/0.2 Window-5, 3-Signal (0.2/0.1/0.7), and Tuned Weighted Fusion.
+    Uses SeedSequence to derive independent, isolated RNG seeds for:
+      - data split (seed_split)
+      - synthetic anomaly injection (seed_injection)
+      - Isolation Forest models (seed_if)
+      - Transformer training (seed_tf)
+      - heuristic graph sanity testing (seed_graph)
     """
-    rng = np.random.default_rng(seed)
-    real_addresses = np.array(list(df['address_id'].unique()))
-    rng.shuffle(real_addresses)
+    ss = np.random.SeedSequence(seed)
+    child_seeds = ss.generate_state(5)
+    seed_split = int(child_seeds[0]) % (2**31 - 1)
+    seed_injection = int(child_seeds[1]) % (2**31 - 1)
+    seed_if = int(child_seeds[2]) % (2**31 - 1)
+    seed_tf = int(child_seeds[3]) % (2**31 - 1)
+    seed_graph = int(child_seeds[4]) % (2**31 - 1)
+    
+    # 1. Deterministic Data Split
+    rng_split = np.random.default_rng(seed_split)
+    real_addresses = np.sort(df['address_id'].unique())
+    rng_split.shuffle(real_addresses)
     
     split_idx = int(len(real_addresses) * 0.70)
     train_addrs = set(real_addresses[:split_idx])
@@ -356,17 +461,16 @@ def run_single_seed_benchmark(
     train_df = df[df['address_id'].isin(train_addrs)].copy()
     test_real_df = df[df['address_id'].isin(test_real_addrs)].copy()
     
-    # Generate synthetic anomalies
-    synth_df, synth_types = generate_synthetic_anomalies(train_df, n_per_type=n_per_type, seed=seed)
+    # 2. Synthetic Anomalies with dedicated injection seed
+    synth_df, synth_types = generate_synthetic_anomalies(train_df, n_per_type=n_per_type, seed=seed_injection)
     synth_addrs = set(synth_types.keys())
     
     test_df = pd.concat([test_real_df, synth_df], ignore_index=True)
-    all_test_addrs = list(test_real_addrs | synth_addrs)
-    
+    all_test_addrs = sorted(list(test_real_addrs | synth_addrs))
     y_true = np.array([1 if a in synth_addrs else 0 for a in all_test_addrs])
     
-    # 1. Legacy IF Pipeline
-    legacy_cfg = Config(legacy_features=True, seed=seed, contamination=config.contamination)
+    # 3. Legacy IF Pipeline
+    legacy_cfg = Config(legacy_features=True, seed=seed_if, random_state=seed_if, contamination=config.contamination)
     train_legacy_feats, _ = extract_legacy_features(train_df, legacy_cfg)
     test_legacy_feats, _ = extract_legacy_features(test_df, legacy_cfg)
     
@@ -377,13 +481,20 @@ def run_single_seed_benchmark(
     X_train_leg = scaler_leg.fit_transform(num_train_leg)
     X_test_leg = scaler_leg.transform(num_test_leg.loc[all_test_addrs])
     
-    if_legacy = IsolationForest(contamination=config.contamination, random_state=seed)
+    if_legacy = IsolationForest(contamination=config.contamination, random_state=seed_if)
     if_legacy.fit(X_train_leg)
     scores_legacy = -if_legacy.score_samples(X_test_leg)
     
-    # 2. Fixed-Features IF Pipeline (Without Network Features by default)
-    train_fixed_feats, G_train = extract_all_features(train_df, config)
-    test_fixed_feats, G_test = extract_all_features(test_df, config)
+    # 4. Fixed-Features IF Pipeline (Without Network Features by default)
+    fixed_cfg = Config(
+        include_network_features=False,
+        seed=seed_if,
+        random_state=seed_if,
+        contamination=config.contamination,
+        if_max_features=config.if_max_features
+    )
+    train_fixed_feats, G_train = extract_all_features(train_df, fixed_cfg)
+    test_fixed_feats, G_test = extract_all_features(test_df, fixed_cfg)
     
     num_train_fixed = prepare_numeric_features(train_fixed_feats)
     num_test_fixed = prepare_numeric_features(test_fixed_feats).reindex(columns=num_train_fixed.columns).fillna(0.0)
@@ -392,14 +503,15 @@ def run_single_seed_benchmark(
     X_train_fixed = scaler_fixed.fit_transform(num_train_fixed)
     X_test_fixed = scaler_fixed.transform(num_test_fixed.loc[all_test_addrs])
     
-    if_fixed = IsolationForest(contamination=config.contamination, random_state=seed)
+    if_fixed = IsolationForest(contamination=config.contamination, max_features=config.if_max_features, random_state=seed_if)
     if_fixed.fit(X_train_fixed)
     scores_fixed_if = -if_fixed.score_samples(X_test_fixed)
     
-    # 2b. Fixed-Features IF WITH Network Features (for Negative Result Ablation)
+    # 4b. Fixed-Features IF WITH Network Features (for Negative Result Ablation)
     cfg_with_net = Config(
         include_network_features=True,
-        seed=seed,
+        seed=seed_if,
+        random_state=seed_if,
         contamination=config.contamination,
         link_window_hours=config.link_window_hours,
         link_tolerance=config.link_tolerance
@@ -411,24 +523,34 @@ def run_single_seed_benchmark(
     scaler_wnet = StandardScaler()
     X_train_wnet = scaler_wnet.fit_transform(num_train_wnet)
     X_test_wnet = scaler_wnet.transform(num_test_wnet.loc[all_test_addrs])
-    if_wnet = IsolationForest(contamination=config.contamination, random_state=seed)
+    if_wnet = IsolationForest(contamination=config.contamination, random_state=seed_if)
     if_wnet.fit(X_train_wnet)
     scores_fixed_if_with_net = -if_wnet.score_samples(X_test_wnet)
     
-    # 3. Transformer Sequence Surprise Pipeline
-    tf_detector = SequenceAnomalyDetector(config)
+    # 5. Transformer Sequence Surprise Pipeline
+    cfg_tf = Config(
+        epochs=config.epochs,
+        seed=seed_tf,
+        random_state=seed_tf,
+        contamination=config.contamination,
+        min_seq_len=config.min_seq_len
+    )
+    tf_detector = SequenceAnomalyDetector(cfg_tf)
     tf_detector.fit(train_df)
     tf_scores_df, _, _ = tf_detector.score_addresses(test_df)
     
-    scores_tf = []
+    # Primary surprise (window-5 max)
+    scores_tf_win5 = []
     for a in all_test_addrs:
-        if a in tf_scores_df.index:
-            scores_tf.append(float(tf_scores_df.loc[a, 'transformer_surprise']))
+        if a in tf_scores_df.index and 'transformer_surprise_window_max' in tf_scores_df.columns:
+            scores_tf_win5.append(float(tf_scores_df.loc[a, 'transformer_surprise_window_max']))
+        elif a in tf_scores_df.index:
+            scores_tf_win5.append(float(tf_scores_df.loc[a, 'transformer_surprise']))
         else:
-            scores_tf.append(0.0)
-    scores_tf = np.array(scores_tf)
+            scores_tf_win5.append(0.0)
+    scores_tf_win5 = np.array(scores_tf_win5)
     
-    # Previous TF Mean surprise for comparative evaluation
+    # Mean surprise
     scores_tf_mean = []
     for a in all_test_addrs:
         if a in tf_scores_df.index and 'transformer_surprise_mean' in tf_scores_df.columns:
@@ -441,30 +563,28 @@ def run_single_seed_benchmark(
     
     # Ranks for Fusion
     ranks_fixed = rankdata(scores_fixed_if) / len(scores_fixed_if)
-    ranks_tf = rankdata(scores_tf) / len(scores_tf)
+    ranks_tf_win5 = rankdata(scores_tf_win5) / len(scores_tf_win5)
     ranks_tf_mean = rankdata(scores_tf_mean) / len(scores_tf_mean)
     
-    # 4. Mean-Rank Fusion (0.5 / 0.5)
-    scores_mean_rank = 0.5 * ranks_fixed + 0.5 * ranks_tf
-    
-    # 5. Max-Rank Fusion
-    scores_max_rank = np.maximum(ranks_fixed, ranks_tf)
-    
-    # 6. Previous Fusion (0.8 Fixed IF + 0.2 TF Mean)
-    scores_prev_fusion = 0.8 * ranks_fixed + 0.2 * ranks_tf_mean
-    
-    # 7. Tuned Weighted Fusion (selected from independent tuning seeds 101-103)
-    scores_tuned = w_if * ranks_fixed + w_tf * ranks_tf
+    # Ensembles
+    scores_mean_rank = 0.5 * ranks_fixed + 0.5 * ranks_tf_mean
+    scores_max_rank = np.maximum(ranks_fixed, ranks_tf_mean)
+    scores_08_02_mean = 0.8 * ranks_fixed + 0.2 * ranks_tf_mean
+    scores_08_02_win5 = 0.8 * ranks_fixed + 0.2 * ranks_tf_win5
+    scores_3signal = 0.20 * ranks_fixed + 0.10 * ranks_tf_mean + 0.70 * ranks_tf_win5
+    scores_tuned = w_if * ranks_fixed + w_tf * ranks_tf_win5
     tuned_label = f'Ensemble (Tuned {w_if:.1f}/{w_tf:.1f})'
     
     models = {
         'Legacy IF': scores_legacy,
         'Fixed IF': scores_fixed_if,
         'Fixed IF (with Network Features)': scores_fixed_if_with_net,
-        'Transformer': scores_tf,
+        'Transformer': scores_tf_win5,
         'Ensemble (Mean-Rank)': scores_mean_rank,
         'Ensemble (Max-Rank)': scores_max_rank,
-        'Ensemble (Current 0.8/0.2 Mean)': scores_prev_fusion,
+        'Ensemble (Current 0.8/0.2 Mean)': scores_08_02_mean,
+        'Ensemble (0.8/0.2 Window-5)': scores_08_02_win5,
+        'Ensemble (3-Signal 0.2/0.1/0.7)': scores_3signal,
         tuned_label: scores_tuned
     }
     

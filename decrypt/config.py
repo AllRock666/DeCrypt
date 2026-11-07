@@ -35,6 +35,7 @@ class Config:
     
     # Benchmark flag
     benchmark: bool = False
+    profile: str = 'batch'  # 'batch' or 'streaming'
     
     # Schema Mapping parameters
     col_id: str = 'address_id'
