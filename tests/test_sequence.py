@@ -10,7 +10,12 @@ from decrypt.sequence import (
     SequenceAnomalyDetector,
     compute_ensemble_scores
 )
-from decrypt.benchmark import inject_alternating_cycles
+from decrypt.benchmark import (
+    inject_alternating_cycles,
+    inject_burst,
+    inject_structuring,
+    inject_bot_periodic
+)
 
 def test_bin_edges_and_events():
     df = pd.DataFrame({
@@ -149,3 +154,48 @@ def test_contamination_helper():
         assert wd_amt < 0
         ratio = abs(wd_amt) / dep_amt
         assert 0.96 <= ratio <= 1.00
+
+def test_inject_embedded_archetypes():
+    df_addr = pd.DataFrame({
+        'address_id': ['addr_test'] * 5,
+        'hash': [f't{i}' for i in range(5)],
+        'timestamp': pd.to_datetime([
+            '2023-01-01 10:00:00',
+            '2023-01-01 11:00:00',
+            '2023-01-01 12:00:00',
+            '2023-01-01 13:00:00',
+            '2023-01-01 14:00:00'
+        ]),
+        'type': [1, -1, 1, -1, 1],
+        'amount': [10.0, -9.8, 25.0, -24.5, 50.0]
+    })
+    pos_amounts = np.array([5.0, 10.0, 20.0, 100.0])
+
+    # 1. Burst
+    res_burst = inject_burst(df_addr, pos_amounts=pos_amounts, seed=42, n_txs=20)
+    assert len(res_burst) == 25
+    assert res_burst['timestamp'].is_monotonic_increasing
+    inj_burst = res_burst.iloc[5:].reset_index(drop=True)
+    assert inj_burst['timestamp'].min() > df_addr['timestamp'].max()
+    assert (inj_burst['timestamp'].diff().dropna().dt.total_seconds() <= 31.0).all()
+
+    # 2. Structuring
+    res_struct = inject_structuring(df_addr, pos_amounts=pos_amounts, seed=42, threshold=100.0, n_deposits=10)
+    assert len(res_struct) == 5 + 10 + 1  # 5 orig + 10 deposits + 1 wd
+    assert res_struct['timestamp'].is_monotonic_increasing
+    inj_struct = res_struct.iloc[5:].reset_index(drop=True)
+    assert inj_struct['timestamp'].min() > df_addr['timestamp'].max()
+    # 10 deposits followed by 1 withdrawal
+    assert list(inj_struct['type']) == [1] * 10 + [-1]
+    total_dep = inj_struct.iloc[:10]['amount'].sum()
+    assert abs(inj_struct.iloc[10]['amount'] + total_dep) < 1e-4
+
+    # 3. Bot-Periodic
+    res_bot = inject_bot_periodic(df_addr, pos_amounts=pos_amounts, seed=42, fixed_dt=300.0, fixed_amt=25.0, n_txs=15)
+    assert len(res_bot) == 5 + 15
+    assert res_bot['timestamp'].is_monotonic_increasing
+    inj_bot = res_bot.iloc[5:].reset_index(drop=True)
+    assert inj_bot['timestamp'].min() > df_addr['timestamp'].max()
+    dts = inj_bot['timestamp'].diff().dropna().dt.total_seconds()
+    assert np.allclose(dts, 300.0)
+    assert (inj_bot['amount'].abs() == 25.0).all()

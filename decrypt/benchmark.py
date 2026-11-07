@@ -379,7 +379,7 @@ def generate_synthetic_anomalies(
 def inject_alternating_cycles(
     addr_df,
     k: int,
-    pos_amounts,
+    pos_amounts = None,
     rng = None,
     seed: int = 42
 ):
@@ -395,6 +395,8 @@ def inject_alternating_cycles(
         rng = np.random.default_rng(seed)
     if len(addr_df) == 0:
         return addr_df.copy()
+    if pos_amounts is None or len(pos_amounts) == 0:
+        pos_amounts = np.array([1.0, 5.0, 10.0, 20.0, 50.0])
         
     addr = addr_df['address_id'].iloc[0]
     last_t = addr_df['timestamp'].max()
@@ -420,6 +422,145 @@ def inject_alternating_cycles(
         })
         cur_t += pd.Timedelta(hours=float(rng.uniform(2.0, 8.0)))
     
+    res = pd.concat([addr_df, pd.DataFrame(new_rows)], ignore_index=True)
+    return res.sort_values('timestamp').reset_index(drop=True)
+
+def inject_burst(
+    addr_df,
+    pos_amounts = None,
+    rng = None,
+    seed: int = 42,
+    n_txs: int = None
+):
+    """
+    Injects a high-frequency burst into an existing real address history.
+    Default 20-30 rapid transactions with short intervals (5-30s).
+    """
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    if len(addr_df) == 0:
+        return addr_df.copy()
+    if pos_amounts is None or len(pos_amounts) == 0:
+        pos_amounts = np.array([1.0, 5.0, 10.0, 20.0, 50.0])
+        
+    addr = addr_df['address_id'].iloc[0]
+    last_t = addr_df['timestamp'].max()
+    cur_t = last_t + pd.Timedelta(hours=float(rng.uniform(1.0, 6.0)))
+    
+    if n_txs is None:
+        n_txs = int(rng.integers(20, 31))
+        
+    new_rows = []
+    for i in range(n_txs):
+        delta = float(rng.uniform(5.0, 30.0))
+        cur_t += pd.Timedelta(seconds=delta)
+        amt = float(rng.choice(pos_amounts))
+        direction = int(rng.choice([1, -1]))
+        new_rows.append({
+            'address_id': addr,
+            'hash': f"contam_burst_{addr}_{i}",
+            'timestamp': cur_t,
+            'type': direction,
+            'amount': amt if direction == 1 else -amt
+        })
+        
+    res = pd.concat([addr_df, pd.DataFrame(new_rows)], ignore_index=True)
+    return res.sort_values('timestamp').reset_index(drop=True)
+
+def inject_structuring(
+    addr_df,
+    pos_amounts = None,
+    rng = None,
+    seed: int = 42,
+    threshold: float = None,
+    n_deposits: int = None
+):
+    """
+    Injects structuring / smurfing transactions into an existing real address history:
+    8-12 repeated deposits just below a round threshold (e.g. 10.0, 50.0, 100.0),
+    spaced by 4-24 hours, followed by a consolidated withdrawal.
+    """
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    if len(addr_df) == 0:
+        return addr_df.copy()
+        
+    addr = addr_df['address_id'].iloc[0]
+    last_t = addr_df['timestamp'].max()
+    cur_t = last_t + pd.Timedelta(hours=float(rng.uniform(1.0, 6.0)))
+    
+    if threshold is None:
+        threshold = float(rng.choice([10.0, 50.0, 100.0]))
+    if n_deposits is None:
+        n_deposits = int(rng.integers(8, 13))
+        
+    total_dep = 0.0
+    new_rows = []
+    for i in range(n_deposits):
+        amt = round(float(rng.uniform(0.85, 0.98)) * threshold, 2)
+        total_dep += amt
+        cur_t += pd.Timedelta(hours=float(rng.uniform(4.0, 24.0)))
+        new_rows.append({
+            'address_id': addr,
+            'hash': f"contam_struct_{addr}_{i}",
+            'timestamp': cur_t,
+            'type': 1,
+            'amount': amt
+        })
+        
+    cur_t += pd.Timedelta(hours=float(rng.uniform(1.0, 6.0)))
+    new_rows.append({
+        'address_id': addr,
+        'hash': f"contam_struct_wd_{addr}",
+        'timestamp': cur_t,
+        'type': -1,
+        'amount': -round(total_dep, 2)
+    })
+    
+    res = pd.concat([addr_df, pd.DataFrame(new_rows)], ignore_index=True)
+    return res.sort_values('timestamp').reset_index(drop=True)
+
+def inject_bot_periodic(
+    addr_df,
+    pos_amounts = None,
+    rng = None,
+    seed: int = 42,
+    fixed_dt: float = None,
+    fixed_amt: float = None,
+    n_txs: int = None
+):
+    """
+    Injects bot-periodic transactions into an existing real address history:
+    15-25 transactions with identical interval (fixed_dt) and identical amount (fixed_amt).
+    """
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    if len(addr_df) == 0:
+        return addr_df.copy()
+        
+    addr = addr_df['address_id'].iloc[0]
+    last_t = addr_df['timestamp'].max()
+    cur_t = last_t + pd.Timedelta(hours=float(rng.uniform(1.0, 6.0)))
+    
+    if fixed_dt is None:
+        fixed_dt = float(rng.choice([300.0, 600.0, 1800.0, 3600.0]))
+    if fixed_amt is None:
+        fixed_amt = float(rng.choice([5.0, 10.0, 25.0, 50.0]))
+    if n_txs is None:
+        n_txs = int(rng.integers(15, 26))
+        
+    new_rows = []
+    for i in range(n_txs):
+        cur_t += pd.Timedelta(seconds=fixed_dt)
+        direction = int(rng.choice([1, -1]))
+        new_rows.append({
+            'address_id': addr,
+            'hash': f"contam_bot_{addr}_{i}",
+            'timestamp': cur_t,
+            'type': direction,
+            'amount': fixed_amt if direction == 1 else -fixed_amt
+        })
+        
     res = pd.concat([addr_df, pd.DataFrame(new_rows)], ignore_index=True)
     return res.sort_values('timestamp').reset_index(drop=True)
 
@@ -580,6 +721,8 @@ def run_single_seed_benchmark(
         'Fixed IF': scores_fixed_if,
         'Fixed IF (with Network Features)': scores_fixed_if_with_net,
         'Transformer': scores_tf_win5,
+        'Transformer (Mean)': scores_tf_mean,
+        'Transformer (Window-5)': scores_tf_win5,
         'Ensemble (Mean-Rank)': scores_mean_rank,
         'Ensemble (Max-Rank)': scores_max_rank,
         'Ensemble (Current 0.8/0.2 Mean)': scores_08_02_mean,

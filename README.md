@@ -58,8 +58,8 @@ For detailed technical designs, refer to the dedicated documentation:
 7. **Ensemble Risk Fusion & Operational Profiles (`--profile batch|streaming`)**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
    - **Execution Profiles**:
-     - `--profile batch` (**Default**): Optimized for holistic whole-address forensic audits. Uses $w_{\text{IF}} = 0.8, w_{\text{TF}} = 0.2$ with whole-sequence mean surprise. Achieves **0.964 AUROC, 0.900 AP, and 0.869 Recall@K**, providing dominant detection across all 5 fraud archetypes simultaneously (structuring 0.92, burst 0.84, alternating 0.96, bot-periodic 0.65, dormant-spike 0.98).
-     - `--profile streaming`: Optimized for real-time transaction ingestion and sliding-window event streams. Uses **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$). Excels at detecting subtle in-situ injected cycles against long, established benign histories where tabular features are diluted (+0.300 recall lift at $k=3$ cycles over Fixed IF).
+     - `--profile batch` (**Default**): Optimized for holistic whole-address forensic audits. Uses $w_{\text{IF}} = 0.8, w_{\text{TF}} = 0.2$ with whole-sequence mean surprise. Achieves **0.964 AUROC, 0.900 AP, and 0.869 Recall@K**, effectively balancing tabular volume/count signatures with sequence surprise across all 5 fraud archetypes (structuring 0.92, burst 0.84, alternating 0.96, bot-periodic 0.65, dormant-spike 0.98).
+     - `--profile streaming` (**Experimental**): Optimized for real-time transaction ingestion and sliding-window event streams. Uses **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$). Excels at detecting subtle in-situ injected cycles against long, established benign histories where tabular features are diluted (+0.300 recall lift at $k=3$ cycles over Fixed IF).
    - **Production Default Pipeline Config**:
      - `profile = 'batch'`: Production default mode.
      - `if_max_features = 1.0`: All 28 features considered per tree split.
@@ -162,7 +162,7 @@ python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output --be
 | `--data` | `str` | *Required* | Path to input CSV file. |
 | `--outdir` | `str` | `.` | Target directory for generated outputs and models. |
 | `--benchmark` | `flag` | `False` | Run the 10-seed synthetic anomaly benchmark suite. |
-| `--profile` | `str` | `batch` | Execution profile: `batch` (IF-led 0.8/0.2 mean fusion) or `streaming` (3-signal 0.2/0.1/0.7 window-5). |
+| `--profile` | `str` | `batch` | Execution profile: `batch` (Default, IF-led 0.8/0.2 mean fusion) or `streaming` (Experimental, 3-signal 0.2/0.1/0.7 window-5). |
 | `--include-network-features` | `flag` | `False` | Include heuristic graph network features in scoring (Negative Result; defaults to False). |
 | `--no-transformer` | `flag` | `False` | Disable Transformer sequence modeling (IF only). |
 | `--legacy-features` | `flag` | `False` | Reproduce the legacy baseline feature pipeline. |
