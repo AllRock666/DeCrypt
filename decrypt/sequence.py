@@ -397,13 +397,14 @@ class SequenceAnomalyDetector:
         self,
         df: pd.DataFrame,
         top_k: int = 3,
-        rolling_window: int = 3
+        rolling_window: int = 5,
+        use_aggregation: str = 'window_max'
     ) -> Tuple[pd.DataFrame, Dict[str, List[Dict[str, Any]]], np.ndarray]:
         """
         Computes leave-one-out surprise scores, top-3 explainability events,
         and address sequence embeddings for all addresses.
         Supports score aggregations:
-          - transformer_surprise (mean across all events)
+          - transformer_surprise (primary score using chosen aggregation, default: window_max with w=5)
           - transformer_surprise_mean (mean across all events)
           - transformer_surprise_topk (mean of top-k most surprising events)
           - transformer_surprise_window_max (maximum rolling window mean surprise)
@@ -559,10 +560,17 @@ class SequenceAnomalyDetector:
                         'nll': round(float(mean_nll[idx]), 3)
                     })
                     
+                if use_aggregation == 'window_max':
+                    primary_surprise = window_max_surprise
+                elif use_aggregation == 'topk':
+                    primary_surprise = topk_surprise
+                else:
+                    primary_surprise = surprise
+                    
                 explanations[addr] = top3_list
                 records.append({
                     'address': addr,
-                    'transformer_surprise': surprise,
+                    'transformer_surprise': primary_surprise,
                     'transformer_surprise_mean': surprise,
                     'transformer_surprise_topk': topk_surprise,
                     'transformer_surprise_window_max': window_max_surprise,

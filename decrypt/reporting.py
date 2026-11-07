@@ -330,13 +330,18 @@ def generate_pdf_report(
         # Paired Bootstrap Differences Table (Tuned Fusion vs Fixed IF)
         paired = benchmark_data.get('paired_differences_tuned_vs_fixed_if', {})
         if paired:
-            elements.append(Paragraph("<b>Paired Bootstrap CI of the Difference: Tuned Fusion (0.8/0.2) vs Fixed IF</b>", h2_style))
+            elements.append(Paragraph("<b>Paired Bootstrap CI of the Difference: Tuned Fusion vs Fixed IF</b>", h2_style))
             p_rows = [
                 ['Metric', 'Paired Mean Difference', '95% Bootstrap CI', 'Statistical Interpretation']
             ]
             for metric, label in [('auroc', 'Δ AUROC'), ('ap', 'Δ Average Precision (AP)'), ('recall_at_k', 'Δ Recall@K')]:
                 d = paired[metric]
-                interp = "Statistically Significant (p < 0.05)" if d['ci_lower'] > 0 else "Overlap with zero (p >= 0.05)"
+                if d['ci_lower'] > 0:
+                    interp = "95% bootstrap CI excludes zero"
+                elif d['ci_lower'] == 0 or d['ci_upper'] == 0:
+                    interp = "Borderline (touches zero)"
+                else:
+                    interp = "Overlap with zero"
                 p_rows.append([
                     Paragraph(f"<b>{label}</b>", cell_style),
                     Paragraph(f"{d['mean']:+.4f}", cell_style),
@@ -368,7 +373,8 @@ def generate_pdf_report(
             for d_tag, d_label in [('15m', '15 minutes (2-15m)'), ('1h', '1 hour (50-70m)'), ('6h', '6 hours (5-7h)'), ('24h', '24 hours (22-26h)')]:
                 tf_v = pt_delays[d_tag]['Transformer']
                 if_v = pt_delays[d_tag]['Fixed IF']
-                en_v = pt_delays[d_tag]['Ensemble (Tuned 0.8/0.2)']
+                tuned_k = [k for k in pt_delays[d_tag] if 'Tuned' in k][0]
+                en_v = pt_delays[d_tag][tuned_k]
                 pt_rows.append([
                     Paragraph(f"<b>{d_label}</b>", cell_style),
                     Paragraph(f"{tf_v['mean']:.2f} [{tf_v['ci_lower']:.2f}, {tf_v['ci_upper']:.2f}]", cell_style),

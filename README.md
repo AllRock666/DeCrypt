@@ -36,38 +36,38 @@ For detailed technical designs, refer to the dedicated documentation:
    - **Sequence Surprise Inference**: Leave-one-out masking on `EventTransformerModel` evaluates negative log-likelihood (NLL) surprise of recent transactions without retraining.
    - **Automated Explainability**: Generates top anomalous behavioral features and identifies the top-3 most surprising sequence events.
 
-4. **Vectorized Behavioral & Temporal Profiling (23 Features)**:
+4. **Vectorized Behavioral & Temporal Profiling (28 Tabular Features)**:
    - Computes true volume ($\sum |amount|$), net flow ($\sum amount$), pass-through ratios, and deposit/withdrawal distributions.
-   - Inactivity metrics via `days_until_end` relative to dataset boundaries.
+   - Activity span and normalized entity-relative temporal centroid `activity_centroid` (mean event offset from first transaction normalized by span).
    - Temporal dynamics via **Goh-Barabási burstiness** $B = \frac{\sigma - \mu}{\sigma + \mu}$, **Coefficient of Variation (CV)** of inter-event times, **lag-1 autocorrelation** of $\Delta t$, and Shannon amount entropy.
    - High-precision behavioral features: **modal-amount share** ($\frac{\text{count}(\text{mode})}{\text{total\_txs}}$) targeting automated/bot behavior.
    - Direction transition dynamics: **`direction_switch_count`** (consecutive event pairs with opposite direction), **`alternation_rate`** ($\frac{\text{switches}}{N-1}$), and **`max_alternating_run_length`** (longest run of alternating direction transitions).
 
 5. **Heuristic Flow Graph (Negative Result: Excluded by Default)**:
    - Traces fund movements between withdrawals and deposits occurring within a configurable window (24h, 2% tolerance).
-   - **Permutation Sanity Test & Negative Result**: Evaluated against null permutation models (20 timestamp-shuffled runs: mean 183.5 edges; 20 amount-shuffled runs: mean 154.5 edges vs. real 137 edges). Permuting timestamps and amounts yields *equal or more* edges than the real graph.
-   - **Ablation Finding**: An ablation benchmark confirms that adding these network features degrades Isolation Forest performance ($\Delta \text{AUROC} = -0.0208$, $\Delta \text{AP} = -0.0566$, $\Delta \text{Recall@K} = -0.0500$). Consequently, the heuristic graph is formally reclassified as a **negative result** and network features are excluded from scoring by default (retained behind `--include-network-features`).
+   - **Permutation Sanity Test & Negative Result**: Evaluated against null permutation models (20 timestamp-shuffled runs: mean 183.4 edges; 20 amount-shuffled runs: mean 154.4 edges vs. real 137 edges). Permuting timestamps and amounts yields *equal or more* edges than the real graph.
+   - **Ablation Finding**: An ablation benchmark confirms that adding these network features degrades Isolation Forest performance ($\Delta \text{AUROC} = -0.0226$, $\Delta \text{AP} = -0.0672$, $\Delta \text{Recall@K} = -0.0510$, where 95% bootstrap CI excludes zero). Consequently, the heuristic graph is formally reclassified as a **negative result** and network features are excluded from scoring by default (retained behind `--include-network-features`).
 
 6. **Masked Event Transformer (`decrypt.sequence`)**:
    - 2-layer, 4-head Transformer encoder ($d_{\text{model}} = 64$) trained on discrete/continuous transaction sequences via 15% masked event modeling.
-   - Generates leave-one-out event **negative log-likelihood (NLL) surprise scores**.
+   - Generates leave-one-out event **negative log-likelihood (NLL) surprise scores** with score aggregations: whole-sequence mean, top-$k$ mean, and rolling-window max (`window5` selected on tuning seeds 101–103).
    - Provides per-address explainability by reporting the top-3 most surprising transactions.
    - Extracts mean-pooled sequence embeddings for non-linear density clustering via **HDBSCAN** and KMeans on the subset of entities with $\ge 3$ events.
    - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
 
 7. **Ensemble Risk Fusion**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
-   - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), and **Tuned Weighted Fusion** ($0.8 \times \text{rank}_{\text{IF}} + 0.2 \times \text{rank}_{\text{TF}}$, calibrated on independent tuning seeds).
+   - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), and **Tuned Weighted Fusion** ($0.9 \times \text{rank}_{\text{IF}} + 0.1 \times \text{rank}_{\text{TF}}$, calibrated on independent tuning seeds 101–103).
    - Entities with fewer than `min_seq_len` (default 3) events (143 with 1 tx + 131 with 2 txs = 274 addresses) are tagged with `insufficient_history=True` and scored via Isolation Forest alone.
 
 8. **Clustering Diagnostics & Subset Analysis**:
    - Tabular KMeans identifies $k=2$ clusters with extreme single-cluster dominance (Cluster 1: 634 addresses / 98.1%; Cluster 0: 12 volume outliers / 1.9%), triggering an automated `>90% single cluster` diagnostic flag.
-   - HDBSCAN evaluated strictly on addresses with $\ge 3$ events ($N=372$) produces 2 clusters (silhouette 0.0984, sizes: Cluster 0 with 339 entities, Cluster 1 with 7 entities, and 26 noise points). KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.4180, sizes: 187 and 185).
+   - HDBSCAN evaluated strictly on addresses with $\ge 3$ events ($N=372$) produces 2 clusters (silhouette 0.1365, sizes: Cluster 0 with 290 entities, Cluster 1 with 7 entities, and 75 noise points). KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.3712, sizes: 180 and 192).
 
 9. **Synthetic Anomaly Benchmark Suite (`decrypt.benchmark`, Gen v2.0)**:
    - Evaluates performance against 5 realistic fraud archetypes: Structuring, Bursts, Alternating Deposit/Withdraw (formerly pass-through, with delay variants: 15m, 1h, 6h, 24h), Bot-Periodic, and Dormant-Spike patterns.
    - Evaluates across 10 random seeds with 20 injections per archetype (100 synthetic anomalies/seed).
-   - Computes 95% bootstrap confidence intervals for all metrics as well as **paired bootstrap CIs of the difference** ($\text{Tuned Fusion} - \text{Fixed IF}$).
+   - Computes 95% bootstrap confidence intervals for all metrics as well as **paired bootstrap CIs of the difference** ($\text{Tuned Fusion} - \text{Fixed IF}$), marking intervals where the 95% bootstrap CI excludes zero or touches zero (borderline).
 
 10. **Multi-Page Reporting & API Services**:
     - Programmatically generates `risk_scores.csv`, a 6-panel visualization dashboard (`fraud_analysis_patterns.png`), and a detailed PDF risk dossier (`fraud_analysis_report.pdf`).

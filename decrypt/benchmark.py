@@ -381,9 +381,21 @@ def run_single_seed_benchmark(
             scores_tf.append(0.0)
     scores_tf = np.array(scores_tf)
     
+    # Previous TF Mean surprise for comparative evaluation
+    scores_tf_mean = []
+    for a in all_test_addrs:
+        if a in tf_scores_df.index and 'transformer_surprise_mean' in tf_scores_df.columns:
+            scores_tf_mean.append(float(tf_scores_df.loc[a, 'transformer_surprise_mean']))
+        elif a in tf_scores_df.index:
+            scores_tf_mean.append(float(tf_scores_df.loc[a, 'transformer_surprise']))
+        else:
+            scores_tf_mean.append(0.0)
+    scores_tf_mean = np.array(scores_tf_mean)
+    
     # Ranks for Fusion
     ranks_fixed = rankdata(scores_fixed_if) / len(scores_fixed_if)
     ranks_tf = rankdata(scores_tf) / len(scores_tf)
+    ranks_tf_mean = rankdata(scores_tf_mean) / len(scores_tf_mean)
     
     # 4. Mean-Rank Fusion (0.5 / 0.5)
     scores_mean_rank = 0.5 * ranks_fixed + 0.5 * ranks_tf
@@ -391,7 +403,10 @@ def run_single_seed_benchmark(
     # 5. Max-Rank Fusion
     scores_max_rank = np.maximum(ranks_fixed, ranks_tf)
     
-    # 6. Tuned Weighted Fusion (selected from independent tuning seeds 101-103)
+    # 6. Previous Fusion (0.8 Fixed IF + 0.2 TF Mean)
+    scores_prev_fusion = 0.8 * ranks_fixed + 0.2 * ranks_tf_mean
+    
+    # 7. Tuned Weighted Fusion (selected from independent tuning seeds 101-103)
     scores_tuned = w_if * ranks_fixed + w_tf * ranks_tf
     tuned_label = f'Ensemble (Tuned {w_if:.1f}/{w_tf:.1f})'
     
@@ -402,6 +417,7 @@ def run_single_seed_benchmark(
         'Transformer': scores_tf,
         'Ensemble (Mean-Rank)': scores_mean_rank,
         'Ensemble (Max-Rank)': scores_max_rank,
+        'Ensemble (Current 0.8/0.2 Mean)': scores_prev_fusion,
         tuned_label: scores_tuned
     }
     
@@ -590,7 +606,8 @@ def run_benchmark(
     # Aggregate statistics with 95% Bootstrap Confidence Intervals
     model_names = [
         'Legacy IF', 'Fixed IF', 'Transformer', 
-        'Ensemble (Mean-Rank)', 'Ensemble (Max-Rank)', tuned_label
+        'Ensemble (Mean-Rank)', 'Ensemble (Max-Rank)',
+        'Ensemble (Current 0.8/0.2 Mean)', tuned_label
     ]
     summary = {}
     archetypes = ["structuring", "burst", "pass_through", "bot_periodic", "dormant_spike"]
@@ -625,6 +642,22 @@ def run_benchmark(
         'recall_at_k': compute_paired_bootstrap_ci(
             [r['metrics'][tuned_label]['recall_at_k'] for r in seed_runs],
             [r['metrics']['Fixed IF']['recall_at_k'] for r in seed_runs]
+        )
+    }
+    
+    # Paired Bootstrap Confidence Intervals of the Difference (Tuned Fusion vs Previous Fusion)
+    paired_diffs_vs_prev = {
+        'auroc': compute_paired_bootstrap_ci(
+            [r['metrics'][tuned_label]['auroc'] for r in seed_runs],
+            [r['metrics']['Ensemble (Current 0.8/0.2 Mean)']['auroc'] for r in seed_runs]
+        ),
+        'ap': compute_paired_bootstrap_ci(
+            [r['metrics'][tuned_label]['ap'] for r in seed_runs],
+            [r['metrics']['Ensemble (Current 0.8/0.2 Mean)']['ap'] for r in seed_runs]
+        ),
+        'recall_at_k': compute_paired_bootstrap_ci(
+            [r['metrics'][tuned_label]['recall_at_k'] for r in seed_runs],
+            [r['metrics']['Ensemble (Current 0.8/0.2 Mean)']['recall_at_k'] for r in seed_runs]
         )
     }
     
@@ -718,6 +751,7 @@ def run_benchmark(
         'n_anomalies_per_seed': n_per_type * 5,
         'summary': summary,
         'paired_differences_tuned_vs_fixed_if': paired_diffs,
+        'paired_differences_tuned_vs_previous_fusion': paired_diffs_vs_prev,
         'pass_through_delay_summary': pt_delay_summary,
         'network_ablation': net_ablation,
         'graph_sanity': sanity_results,
@@ -730,14 +764,16 @@ def run_benchmark(
         json.dump(full_output, f, indent=2)
     logger.info(f"Saved benchmark results JSON to {json_path}")
     
-    print_benchmark_markdown_table(summary, paired_diffs, pt_delay_summary, net_ablation)
+    print_benchmark_markdown_table(summary, paired_diffs, pt_delay_summary, net_ablation, paired_diffs_vs_prev, tuned_label)
     return full_output
 
 def print_benchmark_markdown_table(
     summary: Dict[str, Any],
     paired_diffs: Optional[Dict[str, Any]] = None,
     pt_delays: Optional[Dict[str, Any]] = None,
-    net_ablation: Optional[Dict[str, Any]] = None
+    net_ablation: Optional[Dict[str, Any]] = None,
+    paired_diffs_vs_prev: Optional[Dict[str, Any]] = None,
+    tuned_label: str = 'Ensemble (Tuned)'
 ) -> str:
     lines = []
     lines.append("\n### Benchmark Results (10 Seeds, 20/archetype, 95% Bootstrap CI, Generator v2.0)\n")
@@ -758,13 +794,22 @@ def print_benchmark_markdown_table(
         lines.append(f"| **{name}** | {auroc_s} | {ap_s} | {rec_s} | {st_s} | {bu_s} | {pt_s} | {bp_s} | {ds_s} |")
         
     if paired_diffs:
-        lines.append("\n### Paired Bootstrap CIs of the Difference: Tuned Fusion (0.8/0.2) vs Fixed IF\n")
+        lines.append(f"\n### Paired Bootstrap CIs of the Difference: {tuned_label} vs Fixed IF\n")
         lines.append("| Metric | Paired Mean Difference | 95% Bootstrap CI | Interpretation |")
         lines.append("| :--- | :---: | :---: | :--- |")
         for metric, label in [('auroc', 'AUROC'), ('ap', 'Average Precision (AP)'), ('recall_at_k', 'Recall@K')]:
             d = paired_diffs[metric]
-            lines.append(f"| **Δ {label}** | {d['mean']:+.4f} | [{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}] | "
-                         f"{'Statistically Significant Improvement' if d['ci_lower'] > 0 else 'Overlap with zero'} |")
+            interp = "95% bootstrap CI excludes zero" if d['ci_lower'] > 0 else ("Borderline (touches zero)" if d['ci_lower'] == 0 or d['ci_upper'] == 0 else "Overlap with zero")
+            lines.append(f"| **Δ {label}** | {d['mean']:+.4f} | [{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}] | {interp} |")
+            
+    if paired_diffs_vs_prev:
+        lines.append(f"\n### Paired Bootstrap CIs of the Difference: {tuned_label} vs Previous Ensemble (0.8/0.2 Mean)\n")
+        lines.append("| Metric | Paired Mean Difference | 95% Bootstrap CI | Interpretation |")
+        lines.append("| :--- | :---: | :---: | :--- |")
+        for metric, label in [('auroc', 'AUROC'), ('ap', 'Average Precision (AP)'), ('recall_at_k', 'Recall@K')]:
+            d = paired_diffs_vs_prev[metric]
+            interp = "95% bootstrap CI excludes zero" if d['ci_lower'] > 0 else ("Borderline (touches zero)" if d['ci_lower'] == 0 or d['ci_upper'] == 0 else "Overlap with zero")
+            lines.append(f"| **Δ {label}** | {d['mean']:+.4f} | [{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}] | {interp} |")
                          
     if pt_delays:
         lines.append("\n### Pass-Through Recall by Delay Variant (Transformer vs Fixed IF vs Tuned Fusion)\n")
