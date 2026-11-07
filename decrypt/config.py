@@ -9,6 +9,7 @@ class Config:
     n_clusters: int = 10
     random_state: int = 42
     seed: int = 42
+    if_max_features: float = 1.0
     
     # Feature engineering parameters
     large_tx_multiplier: float = 3.0
@@ -27,8 +28,10 @@ class Config:
     num_layers: int = 2
     dropout: float = 0.1
     max_seq_len: int = 128
-    transformer_weight: float = 0.5
-    if_weight: float = 0.5
+    transformer_weight: float = 0.2
+    if_weight: float = 0.8
+    sequence_aggregation: str = 'window_max'
+    rolling_window: int = 5
     
     # Benchmark flag
     benchmark: bool = False

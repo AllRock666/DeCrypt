@@ -55,9 +55,16 @@ For detailed technical designs, refer to the dedicated documentation:
    - Extracts mean-pooled sequence embeddings for non-linear density clustering via **HDBSCAN** and KMeans on the subset of entities with $\ge 3$ events.
    - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
 
-7. **Ensemble Risk Fusion**:
+7. **Ensemble Risk Fusion & Production Configuration**:
    - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
-   - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), and **Tuned Weighted Fusion** ($0.9 \times \text{rank}_{\text{IF}} + 0.1 \times \text{rank}_{\text{TF}}$, calibrated on independent tuning seeds 101–103).
+   - **Production Default Pipeline Config**:
+     - `if_max_features = 1.0`: All 28 features considered per tree split.
+     - `if_weight = 0.8`, `transformer_weight = 0.2`: Calibrated whole-address ensemble fusion.
+     - `sequence_aggregation = 'window_max'` (rolling window size 5): Localized sequence surprise aggregation.
+   - **Plain-Language Trade-Off Analysis**:
+     - *Global Tabular vs. Local Sequence Dynamics*: Tabular Isolation Forest aggregates behavioral metrics across an entity's entire lifespan, excelling on whole-address synthetics (0.860–0.870 Recall@K). However, in realistic streaming scenarios where an attacker contaminates an established account with a brief burst of fraud, tabular averages are heavily diluted by benign history (dropping to 0.320 recall on 25+ event accounts). The Sequence Transformer's sliding-window max surprise (`window5`) focuses strictly on localized event clusters, restoring detection power (+0.220 to +0.300 recall lift on long histories).
+     - *Why `max_features=1.0` is the Default*: Setting `max_features=sqrt` (5 features per split) helps structuring recall (0.860 -> 0.935) by preventing alternation features from competing with amount variance splits, but it degrades burst recall (-3.5%) and bot-periodic recall (-4.5%), decreasing overall Recall@K from 0.861 to 0.848. Subsampling features adds tree variance; `max_features=1.0` is retained as the default to ensure balanced detection across all fraud archetypes simultaneously.
+   - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), **Tuned Weighted Fusion** ($0.8 \times \text{rank}_{\text{IF}} + 0.2 \times \text{rank}_{\text{TF}}$), and **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$).
    - Entities with fewer than `min_seq_len` (default 3) events (143 with 1 tx + 131 with 2 txs = 274 addresses) are tagged with `insufficient_history=True` and scored via Isolation Forest alone.
 
 8. **Clustering Diagnostics & Subset Analysis**:

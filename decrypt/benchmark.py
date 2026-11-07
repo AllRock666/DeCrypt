@@ -287,6 +287,53 @@ def generate_synthetic_anomalies(
     anomaly_df = pd.DataFrame(records)
     return anomaly_df, anomaly_types
 
+def inject_alternating_cycles(
+    addr_df,
+    k: int,
+    pos_amounts,
+    rng = None,
+    seed: int = 42
+):
+    """
+    Injects k alternating deposit-withdrawal cycles into an existing address sequence.
+    Each cycle consists of:
+    - 1 deposit of an empirical positive amount
+    - 1 withdrawal delayed by 2-15 minutes of ~97-99% of that amount
+    Followed by an inter-cycle gap of 2-8 hours.
+    Preserves original address events and appends newly generated cycle events.
+    """
+    if rng is None:
+        rng = np.random.default_rng(seed)
+    if len(addr_df) == 0:
+        return addr_df.copy()
+        
+    addr = addr_df['address_id'].iloc[0]
+    last_t = addr_df['timestamp'].max()
+    cur_t = last_t + pd.Timedelta(hours=float(rng.uniform(1.0, 6.0)))
+    new_rows = []
+    for cyc in range(k):
+        amt = float(rng.choice(pos_amounts))
+        new_rows.append({
+            'address_id': addr,
+            'hash': f"contam_dep_{addr}_{cyc}",
+            'timestamp': cur_t,
+            'type': 1,
+            'amount': amt
+        })
+        cur_t += pd.Timedelta(minutes=float(rng.uniform(2.0, 15.0)))
+        wd_amt = round(amt * rng.uniform(0.97, 0.99), 2)
+        new_rows.append({
+            'address_id': addr,
+            'hash': f"contam_wd_{addr}_{cyc}",
+            'timestamp': cur_t,
+            'type': -1,
+            'amount': -wd_amt
+        })
+        cur_t += pd.Timedelta(hours=float(rng.uniform(2.0, 8.0)))
+    
+    res = pd.concat([addr_df, pd.DataFrame(new_rows)], ignore_index=True)
+    return res.sort_values('timestamp').reset_index(drop=True)
+
 def run_single_seed_benchmark(
     df: pd.DataFrame,
     seed: int,

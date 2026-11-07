@@ -19,7 +19,8 @@ class AnomalyDetector:
         self.cluster_scaler = StandardScaler()
         self.isolation_forest = IsolationForest(
             contamination=config.contamination,
-            random_state=config.random_state
+            random_state=config.random_state,
+            max_features=getattr(config, 'if_max_features', 1.0)
         )
         self.kmeans: KMeans = None
         

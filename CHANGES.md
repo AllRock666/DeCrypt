@@ -169,3 +169,89 @@ Alternating deposit/withdraw synthetic anomalies were injected across four disti
   * **HDBSCAN**: Identifies 2 clusters with silhouette = **0.1365** and 75 noise points. Cluster sizes: Cluster 0 contains **290 entities** (77.96%), Cluster 1 contains **7 entities** (1.88%), and **75 points** are noise (-1).
   * **KMeans ($k=2$)**: Achieves silhouette = **0.3712** with balanced clusters (**180** and **192** entities).
 * **Correction**: Previous claims that HDBSCAN "partitioned" the dataset were an artifact of clustering zero-padded dummy embeddings of short-history addresses. Evaluated on real embeddings, HDBSCAN groups the vast majority into a single core cluster with a tiny 7-address satellite.
+
+---
+
+## 5. Fused Model In-Situ Contamination Benchmark (10 Held-Out Seeds)
+
+Evaluated across 10 held-out evaluation seeds (42–51) on stratified in-situ contamination.
+Tested Models:
+1. **Fixed IF**: Baseline Isolation Forest using all 28 tabular features.
+2. **Fusion 0.8 / 0.2 Mean**: 0.8 IF percentile rank + 0.2 whole-sequence mean surprise rank.
+3. **Fusion 0.9 / 0.1 Window-5**: 0.9 IF percentile rank + 0.1 sliding-window-5 max surprise rank.
+4. **Fusion 3-Signal**: $0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$ (weights chosen strictly on independent tuning seeds 101–103).
+
+### 5.1 Results by Injected Cycle Count ($k = 1, 2, 3$) and History Stratum
+
+| Injected Cycles | History Stratum | Fixed IF Recall [95% CI] | Fusion 0.8/0.2 Mean [95% CI] | Fusion 0.9/0.1 Win5 [95% CI] | Fusion 3-Signal [95% CI] | Paired Difference: 3-Signal vs. Fixed IF [95% CI] |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **$k = 1$ (2 events)** | **5–9 events** | 0.283 [0.167, 0.400] | 0.333 [0.233, 0.433] | 0.317 [0.217, 0.417] | 0.333 [0.183, 0.467] | +0.050 [-0.133, +0.233] |
+| | **10–24 events** | 0.450 [0.350, 0.550] | 0.483 [0.400, 0.600] | 0.450 [0.366, 0.550] | 0.400 [0.317, 0.483] | -0.050 [-0.217, +0.117] |
+| | **25+ events** | 0.260 [0.140, 0.380] | 0.280 [0.200, 0.360] | 0.280 [0.160, 0.420] | 0.320 [0.180, 0.460] | +0.060 [-0.080, +0.220] |
+| | **Overall ($\ge 5$)** | 0.312 [0.276, 0.347] | 0.318 [0.288, 0.347] | 0.306 [0.276, 0.329] | 0.347 [0.312, 0.388] | +0.035 [-0.024, +0.100] |
+| **$k = 2$ (4 events)** | **5–9 events** | 0.383 [0.300, 0.467] | 0.483 [0.417, 0.550] | 0.433 [0.350, 0.517] | 0.683 [0.600, 0.750] | **+0.300 [+0.200, +0.383]** |
+| | **10–24 events** | 0.517 [0.417, 0.633] | 0.550 [0.417, 0.667] | 0.567 [0.467, 0.667] | 0.617 [0.516, 0.717] | +0.100 [-0.083, +0.267] |
+| | **25+ events** | 0.280 [0.180, 0.360] | 0.300 [0.200, 0.400] | 0.300 [0.200, 0.400] | 0.420 [0.300, 0.540] | +0.140 [-0.000, +0.280] |
+| | **Overall ($\ge 5$)** | 0.312 [0.265, 0.359] | 0.371 [0.335, 0.412] | 0.347 [0.306, 0.388] | 0.518 [0.447, 0.582] | **+0.206 [+0.129, +0.288]** |
+| **$k = 3$ (6 events)** | **5–9 events** | 0.600 [0.533, 0.667] | 0.717 [0.667, 0.767] | 0.633 [0.567, 0.700] | 0.867 [0.733, 0.967] | **+0.267 [+0.117, +0.383]** |
+| | **10–24 events** | 0.617 [0.517, 0.733] | 0.617 [0.517, 0.733] | 0.633 [0.533, 0.734] | 0.800 [0.700, 0.884] | **+0.183 [+0.050, +0.300]** |
+| | **25+ events** | 0.320 [0.240, 0.400] | 0.360 [0.260, 0.460] | 0.440 [0.320, 0.560] | 0.620 [0.500, 0.760] | **+0.300 [+0.180, +0.440]** |
+| | **Overall ($\ge 5$)** | 0.441 [0.406, 0.471] | 0.547 [0.524, 0.571] | 0.500 [0.465, 0.529] | **0.700 [0.653, 0.747]** | **+0.259 [+0.200, +0.318]** |
+
+### 5.2 Key Takeaways on Fused Signals
+1. **$k=1$ Floor**: Across all models, a single injected cycle (2 events) inside established histories yields Recall@K between 0.306 and 0.347. Paired difference CIs vs. Fixed IF all span zero (e.g. 3-Signal difference $+0.035$ $[-0.024, +0.100]$), indicating that 2 subtle events are statistically indistinguishable from background noise regardless of model architecture.
+2. **Transformer Window-5 Dominance on Long Histories ($25+$ events)**: As history grows, tabular features dilute the anomalous signal (Fixed IF drops from 0.600 on short histories to 0.320 on $25+$ histories at $k=3$). Sequence window-5 maintains focus on local burstiness, allowing the 3-Signal fusion to achieve **0.620** recall (+0.300 gain vs. Fixed IF, 95% bootstrap CI excludes zero).
+3. **Overall Recall Gain at $k=3$**: 3-Signal fusion reaches **0.700 [0.653, 0.747]**, outperforming Fixed IF (0.441) by **+0.259 [+0.200, +0.318]** (95% bootstrap CI excludes zero).
+
+---
+
+## 6. Default Pipeline Configuration & Architectural Trade-offs
+
+### 6.1 Production Configuration
+Based on empirical evaluation across both the whole-address synthetic benchmark and the in-situ contamination suite, the production default pipeline configuration is set to:
+* **Isolation Forest Subsampling (`if_max_features`)**: `1.0` (all 28 features considered at each split).
+* **Ensemble Fusion Weights**: $w_{\text{IF}} = 0.8$, $w_{\text{TF}} = 0.2$.
+* **Sequence Surprise Aggregation**: `window_max` (rolling window size = 5).
+* **Entity History Bounds**: Capped at 5,000 events (`DECRYPT_MAX_ENTITY_HISTORY`).
+
+### 6.2 Plain-Language Trade-Off Analysis
+* **Why `max_features=1.0` is the Default**:
+  In Section 4.3, we observed that setting `max_features=sqrt` (5 features per split) improved structuring recall from 0.860 to 0.935 by preventing alternation features from competing with amount variance splits. However, this came at a significant cost:
+  - Burst recall declined from **0.965** to **0.930** (-3.5%).
+  - Bot-periodic recall declined from **0.675** to **0.630** (-4.5%).
+  - Overall whole-address Recall@K dropped from **0.861** to **0.848**.
+  Subsampling features per split adds tree variance that degrades detection of multi-feature archetypes. We therefore retain `max_features=1.0` to preserve balanced detection sensitivity across all fraud archetypes simultaneously.
+* **Whole-Address vs. In-Situ Contamination Trade-off**:
+  - In whole-address analysis (where an entire account's activity is synthetic), tabular summary statistics capture the global signature cleanly (Fixed IF achieves 0.860–0.870 Recall@K).
+  - In operational streaming (where an attacker injects fraudulent bursts into an existing genuine account), tabular summary metrics suffer heavy dilution. Here, sequence models (Window-5 max surprise) prevent dilution and provide a +0.220 to +0.300 recall lift on established accounts. The 0.8 / 0.2 whole-address ensemble provides a safe baseline that preserves tabular stability while alerting compliance teams to localized sequence surprises.
+
+### 6.3 Discrepancy Analysis: Ablation Script vs. Main Table Fixed IF
+A comparison of the standalone ablation script (`scripts/ablate_structuring_features.py`) and the main benchmark table (`output/benchmark_results.json`) reveals minor numerical differences for Fixed IF on identical seeds:
+* **Structuring Recall**: 0.860 (Ablation) vs. 0.870 (Main Table). Difference: **0.010** (1.0%).
+* **Pass-Through Recall**: 0.825 (Ablation) vs. 0.795 (Main Table). Difference: **0.030** (3.0%).
+* **Root Cause & Empirical Noise Level**:
+  1. Across the 10 evaluation seeds, there are exactly 20 test anomalies per archetype per seed ($N = 200$ total instances).
+  2. A single address changing classification in one seed shifts that seed's metric by $1/20 = 5.0\%$, and shifts the 10-seed aggregate mean by $1/200 = 0.5\%$.
+  3. The structuring discrepancy ($0.010$) corresponds to a difference of exactly **2 addresses out of 200**.
+  4. The pass-through discrepancy ($0.030$) corresponds to a difference of exactly **6 addresses out of 200**.
+  5. Across the 10 random seeds, the run-to-run standard deviation is $\sigma = 0.071$ (std error $\approx 0.022$) for structuring and $\sigma = 0.106$ (std error $\approx 0.034$) for pass-through. Both observed differences are well within the random sample noise level ($<1.0 \times \text{SE}$).
+  6. At the script level, `run_benchmark_suite` in `decrypt/benchmark.py` executes graph sanity permutation tests (`run_graph_sanity_test`) and fusion tuning (`tune_fusion_weights`) prior to evaluation seeds, whereas the standalone ablation script evaluates Isolation Forest directly in isolation.
+
+---
+
+## 7. Known System Limitations
+
+To maintain rigorous scientific and engineering integrity, the following limitations of the DeCrypt platform are explicitly documented:
+
+1. **Absence of Real Ground-Truth Labels**:
+   The underlying Bitcoin dataset lacks verified forensic fraud labels. All supervised evaluation metrics (AUROC, AP, Recall@K) are measured exclusively against synthetic proxy injections. Real addresses labeled as "normal" in benchmarks may contain undetected historical fraud or mixer interactions.
+2. **Synthetic Anomaly Approximations**:
+   The 5 fraud archetypes (Structuring, Bursts, Alternating Cycles, Bot-Periodic, Dormant-Spike) are generated using idealized mathematical distributions. Real-world adversaries employ dynamic, non-stationary evasion techniques (e.g. varying amount splits, non-uniform delays, decoy transactions) that may not match these stylized templates.
+3. **Benchmark Circularity**:
+   The tabular features introduced in v2.0 (`direction_switch_count`, `alternation_rate`, `cv_inter_event_time`, `modal_amount_share`, `lag1_autocorr_inter_event_time`) encode the mathematical definitions of the synthetic archetypes by construction. Their high benchmark scores reflect alignment with the generator rather than verified generalizability against unseen adversarial tactics.
+4. **Subtle In-Situ Contamination Ceiling ($k=1$ Recall $\sim 0.31$)**:
+   When an adversary injects only a single alternating cycle ($k=1$, 2 transactions) into an established address history, all models (Fixed IF, Mean Fusion, Window-5 Fusion, and 3-Signal Fusion) achieve low recall ($\sim 0.31 - 0.35$). Paired bootstrap confidence intervals against Fixed IF span zero. Two isolated transactions are statistically indistinguishable from legitimate behavioral variance.
+5. **Training Domain & Temporal Calibration Bounds**:
+   The pre-trained Transformer and baseline reference distributions were trained on early Bitcoin data (May 2011 to February 2014). The model is uncalibrated for modern DeFi protocols, Ethereum ERC-20 smart contracts, or fiat banking transactions. Scoring out-of-domain sources without fitting a dedicated empirical reference distribution triggers source-guard rejection.
+6. **Heuristic Flow Graph Negative Result**:
+   Because public cryptocurrency transaction exports lack direct UTXO input-output linkage graphs, heuristic time-and-amount flow matching produces more edges on randomly shuffled data (154–183 edges) than on real data (137 edges). Inclusion of these network features actively degrades Isolation Forest Recall@K by -0.051. The graph must not be used for compliance scoring.

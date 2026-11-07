@@ -10,6 +10,7 @@ from decrypt.sequence import (
     SequenceAnomalyDetector,
     compute_ensemble_scores
 )
+from decrypt.benchmark import inject_alternating_cycles
 
 def test_bin_edges_and_events():
     df = pd.DataFrame({
@@ -73,3 +74,78 @@ def test_ensemble_scoring():
     # C has insufficient history, so its score is purely from IF
     assert res.loc['C', 'insufficient_history'] == True
     assert len(res) == 3
+
+def test_sequence_aggregations_spike_sensitivity():
+    # Test that a short injected spike raises window-max and top-k scores much more than mean
+    # Simulate a baseline sequence with uniform low event surprises vs an injected spike
+    length = 30
+    normal_nll = np.full(length, 1.0, dtype=np.float32)
+    spike_nll = normal_nll.copy()
+    spike_nll[10:15] = 10.0  # 5-event concentrated spike
+    
+    mean_normal = float(np.mean(normal_nll))
+    mean_spiked = float(np.mean(spike_nll))
+    
+    # window-5 max
+    w5_normal = float(np.max([np.mean(normal_nll[i:i+5]) for i in range(length - 4)]))
+    w5_spiked = float(np.max([np.mean(spike_nll[i:i+5]) for i in range(length - 4)]))
+    
+    # top-3 mean
+    top3_normal = float(np.mean(np.sort(normal_nll)[-3:]))
+    top3_spiked = float(np.mean(np.sort(spike_nll)[-3:]))
+    
+    delta_mean = mean_spiked - mean_normal
+    delta_w5 = w5_spiked - w5_normal
+    delta_top3 = top3_spiked - top3_normal
+    
+    # A short injected spike of length 5 in a 30-event sequence:
+    # delta_mean = (5 * 9.0) / 30 = 1.5
+    # delta_w5 = 10.0 - 1.0 = 9.0
+    # delta_w5 should be much larger (6x larger!) than delta_mean
+    assert delta_w5 > delta_mean * 4.0
+    assert delta_top3 > delta_mean * 4.0
+    assert w5_spiked == 10.0
+    assert round(delta_mean, 2) == 1.5
+
+def test_contamination_helper():
+    df_addr = pd.DataFrame({
+        'address_id': ['addr_test'] * 5,
+        'hash': [f'h_{i}' for i in range(5)],
+        'timestamp': pd.to_datetime([
+            '2023-01-01 10:00:00',
+            '2023-01-01 12:00:00',
+            '2023-01-01 14:00:00',
+            '2023-01-01 16:00:00',
+            '2023-01-01 18:00:00'
+        ]),
+        'type': [1, -1, 1, -1, 1],
+        'amount': [10.0, -9.8, 25.0, -24.5, 50.0]
+    })
+    pos_amounts = np.array([5.0, 10.0, 20.0, 100.0])
+    k = 2
+    
+    res = inject_alternating_cycles(df_addr, k=k, pos_amounts=pos_amounts, seed=42)
+    
+    # 5 original + 2*2 injected = 9 rows
+    assert len(res) == 9
+    assert res['address_id'].nunique() == 1
+    assert res['address_id'].iloc[0] == 'addr_test'
+    
+    # Timestamps strictly ascending
+    assert res['timestamp'].is_monotonic_increasing
+    
+    # Injected transactions start after original last timestamp
+    injected = res.iloc[5:].reset_index(drop=True)
+    assert injected['timestamp'].min() > df_addr['timestamp'].max()
+    
+    # Injected types alternate: deposit (+1), withdraw (-1), deposit (+1), withdraw (-1)
+    assert list(injected['type']) == [1, -1, 1, -1]
+    
+    # Amounts check: deposits > 0, withdrawals < 0 and ~97-99% of deposit
+    for cyc in range(k):
+        dep_amt = injected.loc[2 * cyc, 'amount']
+        wd_amt = injected.loc[2 * cyc + 1, 'amount']
+        assert dep_amt in pos_amounts
+        assert wd_amt < 0
+        ratio = abs(wd_amt) / dep_amt
+        assert 0.96 <= ratio <= 1.00
