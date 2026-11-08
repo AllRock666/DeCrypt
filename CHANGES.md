@@ -63,8 +63,8 @@ Paired differences $\Delta = \text{Model} - \text{Batch Fusion}$ on the whole-ad
 * **The Noise Threshold vs. Drop Magnitude**: The run-to-run random seed noise level is approximately **~0.01–0.03**. The observed drops in 3-signal fusion (-0.102 AUROC, -0.152 AP, -0.210 Recall@K) exceed the noise level by **over 5x to 10x**.
 * **Mechanistic Cause**: In 3-signal fusion, 70% weight is allocated to localized Window-5 max surprise, and only 20% to Isolation Forest. Whole-address anomalies exhibit diffuse behavioral signatures across the entity's complete lifespan (high burst count, total structuring turnover, strict inter-arrival time regularity). The localized 5-event window captures local transition surprise but completely loses the macroscopic count/volume distributions that tabular Isolation Forest isolates.
 * **Architectural Resolution**: Because 3-Signal severely impairs whole-address detection, it **cannot be the global default**. Instead, we introduce `--profile batch|streaming`:
-  - `batch` (**Default**): 0.8 IF + 0.2 TF Mean surprise. Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes.
-  - `streaming` (**Experimental**): 3-Signal ($0.20 \text{ IF} + 0.10 \text{ Mean} + 0.70 \text{ Window-5}$). Applied in real-time streaming where local burstiness must be captured amidst long benign histories.
+  - `batch` (**Default**): $0.80 \times \text{rank}_{\text{IF}} + 0.20 \times \text{rank}_{\text{TF, mean}}$. Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes.
+  - `streaming` (**Experimental**): 3-Signal ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, mean}} + 0.70 \times \text{rank}_{\text{TF, win5}}$). Applied in real-time streaming where local burstiness must be captured amidst long benign histories.
 
 ---
 

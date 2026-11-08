@@ -1,10 +1,11 @@
 # DeCrypt: Multi-Source Financial & Cryptocurrency Anomaly Detection Platform
 
-**DeCrypt** is an end-to-end, high-performance financial and cryptocurrency transaction anomaly detection platform. It combines **multi-source real-time streaming ingestion** (Plaid Sandbox banking, Alchemy EVM, Blockstream/Mempool.space Bitcoin, legacy CSVs) with **calibrated machine learning** (vectorized behavioral profiling, Isolation Forest, and a BERT-style Masked Event Transformer).
+> [!NOTE]
+> **Research Prototype Status**: DeCrypt is an experimental research prototype for multi-source financial and cryptocurrency transaction anomaly detection. Baseline models and empirical reference distributions are calibrated exclusively on historical Bitcoin on-chain transactions (May 2011 to February 2014). An automated **source guard** restricts scoring on non-Bitcoin sources without refitting, and a **temporal-drift warning** triggers for transactions dated outside the historical calibration window (e.g. 2026). External provider adapters (Plaid Sandbox banking, Alchemy EVM, Esplora Bitcoin) are verified on recorded test fixtures only, without live network API validation.
 
 DeCrypt operates in two complementary modes:
-1. **Continuous Real-Time Streaming Service**: A high-throughput FastAPI service with sliding-window rate limiting, HMAC webhook signature verification, SHA-256 idempotency, incremental 23-feature extraction, and leave-one-out sequence surprise scoring.
-2. **Forensic Batch Engine**: Full offline dataset analysis generating multi-page PDF dossiers, cross-seed synthetic fraud benchmarks, clustering diagnostics, and CSV score exports.
+1. **Forensic Batch Engine**: Full offline dataset analysis generating multi-page PDF dossiers, cross-seed synthetic fraud benchmarks, clustering diagnostics, and CSV risk score exports.
+2. **Continuous Real-Time Streaming Service**: A FastAPI service featuring sliding-window rate limiting, HMAC webhook signature verification, SHA-256 idempotency, incremental 28-feature extraction, and leave-one-out sequence surprise scoring.
 
 ---
 
@@ -19,9 +20,9 @@ For detailed technical designs, refer to the dedicated documentation:
 ### Core Components
 
 1. **Unified Domain & Canonical Schema (`decrypt.domain.schema`)**:
-   - `UnifiedTransaction` schema enforcing arbitrary `Decimal` precision (eliminating IEEE 754 floating-point drift) and strict UTC normalization.
+   - `UnifiedTransaction` schema enforcing arbitrary `Decimal` precision and strict UTC normalization.
    - Deterministic SHA-256 idempotency key generation across heterogeneous providers.
-   - Genuine wallet-level UTXO decomposition for Bitcoin transactions, distinguishing actual net spend/receipt from unrelated multi-input/output change flows.
+   - Wallet-level UTXO decomposition for Bitcoin transactions, distinguishing actual net spend/receipt from unrelated multi-input/output change flows.
    - Seamless bidirectional backward compatibility with legacy 5-column transaction CSVs.
 
 2. **Multi-Source Ingestion Layer (`decrypt.providers`)**:
@@ -31,16 +32,16 @@ For detailed technical designs, refer to the dedicated documentation:
 
 3. **Incremental Real-Time ML Engine (`decrypt.pipeline`)**:
    - **State Management**: `EntityStateManager` maintains an in-memory sliding window of the last 128 events per entity.
-   - **Incremental Behavioral Profiling**: `IncrementalFeatureExtractor` computes the exact 23 vectorized features on-the-fly without requiring full-dataset group-by table scans.
+   - **Incremental Behavioral Profiling**: `IncrementalFeatureExtractor` computes the exact 28 vectorized features on-the-fly without requiring full-dataset group-by table scans.
    - **Reference Distribution Calibration**: Eliminates $N=1$ rank distortion in real-time inference by scoring entities against frozen empirical CDF reference distributions (`scipy.stats.percentileofscore`).
    - **Sequence Surprise Inference**: Leave-one-out masking on `EventTransformerModel` evaluates negative log-likelihood (NLL) surprise of recent transactions without retraining.
    - **Automated Explainability**: Generates top anomalous behavioral features and identifies the top-3 most surprising sequence events.
 
 4. **Vectorized Behavioral & Temporal Profiling (28 Tabular Features)**:
-   - Computes true volume ($\sum |amount|$), net flow ($\sum amount$), pass-through ratios, and deposit/withdrawal distributions.
+   - Computes true volume ($\sum |\text{amount}|$), net flow ($\sum \text{amount}$), pass-through ratios, and deposit/withdrawal distributions.
    - Activity span and normalized entity-relative temporal centroid `activity_centroid` (mean event offset from first transaction normalized by span).
    - Temporal dynamics via **Goh-Barabási burstiness** $B = \frac{\sigma - \mu}{\sigma + \mu}$, **Coefficient of Variation (CV)** of inter-event times, **lag-1 autocorrelation** of $\Delta t$, and Shannon amount entropy.
-   - High-precision behavioral features: **modal-amount share** ($\frac{\text{count}(\text{mode})}{\text{total\_txs}}$) targeting automated/bot behavior.
+   - High-precision behavioral features: **modal-amount share** ($\frac{\text{count}(\text{mode})}{\text{total txs}}$) targeting automated/bot behavior.
    - Direction transition dynamics: **`direction_switch_count`** (consecutive event pairs with opposite direction), **`alternation_rate`** ($\frac{\text{switches}}{N-1}$), and **`max_alternating_run_length`** (longest run of alternating direction transitions).
 
 5. **Heuristic Flow Graph (Negative Result: Excluded by Default)**:
@@ -56,18 +57,18 @@ For detailed technical designs, refer to the dedicated documentation:
    - **Alternating Deposit/Withdraw Detection**: The Transformer detects rapid alternating deposit/withdraw cycles and unusual inter-arrival timings. *Note: the model evaluates discrete transition surprises and does not verify fund conservation.*
 
 7. **Ensemble Risk Fusion & Operational Profiles (`--profile batch|streaming`)**:
-   - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($0.0 - 100.0$).
+   - Combines Isolation Forest deviance scores with Transformer surprise scores using percentile-rank calibration ($[0.0, 100.0]$).
    - **Execution Profiles**:
-     - `--profile batch` (**Default**): Optimized for holistic whole-address forensic audits. Uses $w_{\text{IF}} = 0.8, w_{\text{TF}} = 0.2$ with whole-sequence mean surprise. Achieves **0.964 AUROC, 0.900 AP, and 0.869 Recall@K**. Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes (structuring 0.92, burst 0.84, alternating 0.96, bot-periodic 0.65, dormant-spike 0.98).
-     - `--profile streaming` (**Experimental**): Optimized for real-time transaction ingestion and sliding-window event streams. Uses **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$). Excels at detecting subtle in-situ injected cycles against long, established benign histories where tabular features are diluted (+0.300 recall lift at $k=3$ cycles over Fixed IF).
+     - `--profile batch` (**Default**): Optimized for holistic whole-address forensic audits. Uses $0.80 \times \text{rank}_{\text{IF}} + 0.20 \times \text{rank}_{\text{TF, mean}}$ ($w_{\text{IF}} = 0.8, w_{\text{TF}} = 0.2$) with whole-sequence mean surprise. Achieves **0.964 AUROC, 0.900 AP, and 0.869 Recall@K**. Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes (structuring 0.92, burst 0.84, alternating 0.96, bot-periodic 0.65, dormant-spike 0.98).
+     - `--profile streaming` (**Experimental**): Optimized for real-time transaction ingestion and sliding-window event streams. Uses **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, mean}} + 0.70 \times \text{rank}_{\text{TF, win5}}$). Detects subtle in-situ injected cycles against long, established benign histories where tabular features are diluted (+0.229 [+0.112, +0.341] Recall@K lift at $k=3$ cycles over Fixed IF, overall).
    - **Production Default Pipeline Config**:
      - `profile = 'batch'`: Production default mode.
      - `if_max_features = 1.0`: All 28 features considered per tree split.
      - `if_weight = 0.8`, `transformer_weight = 0.2`: Calibrated whole-address ensemble fusion.
    - **Plain-Language Trade-Off Analysis**:
-     - *Global Tabular vs. Local Sequence Dynamics*: Tabular Isolation Forest aggregates behavioral metrics across an entity's entire lifespan, excelling on whole-address synthetics (0.860–0.870 Recall@K). However, in realistic streaming scenarios where an attacker contaminates an established account with a brief burst of fraud, tabular averages are heavily diluted by benign history (dropping to 0.320 recall on 25+ event accounts). The Sequence Transformer's sliding-window max surprise (`window5`) focuses strictly on localized event clusters, restoring detection power (+0.220 to +0.300 recall lift on long histories).
-     - *Why `max_features=1.0` is the Default*: Setting `max_features=sqrt` (5 features per split) helps structuring recall (0.860 -> 0.935) by preventing alternation features from competing with amount variance splits, but it degrades burst recall (-3.5%) and bot-periodic recall (-4.5%), decreasing overall Recall@K from 0.861 to 0.848. Subsampling features adds tree variance; `max_features=1.0` is retained as the default to ensure balanced detection across all fraud archetypes simultaneously.
-   - Multiple fusion strategies supported: **Mean-Rank** (0.5/0.5 rank average), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), **Tuned Weighted Fusion** ($0.8 \times \text{rank}_{\text{IF}} + 0.2 \times \text{rank}_{\text{TF}}$), and **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, Mean}} + 0.70 \times \text{rank}_{\text{TF, Win5}}$).
+     - *Global Tabular vs. Local Sequence Dynamics*: Tabular Isolation Forest aggregates behavioral metrics across an entity's entire lifespan, performing strongly on whole-address synthetics (0.856 [0.835, 0.875] Recall@K for Fixed IF, 0.869 [0.852, 0.887] for Batch Fusion). However, in realistic streaming scenarios where an attacker contaminates an established account with subtle fraud, tabular averages are diluted by benign history (dropping to 0.360 [0.180, 0.540] Recall@K on 25+ event accounts at $k=3$). The Sequence Transformer's sliding-window max surprise (`window5`) focuses on localized event clusters, restoring detection power (+0.229 [+0.112, +0.341] Recall@K lift at $k=3$ cycles over Fixed IF, overall; reaching 0.600 [0.440, 0.740] on 25+ event accounts).
+     - *Why `max_features=1.0` is the Default*: Setting `max_features=sqrt` (5 features per split) helps structuring recall (0.860 -> 0.935) by preventing alternation features from competing with amount variance splits, but it degrades pass-through recall (-7.5%) and bot-periodic recall (-9.0%), decreasing overall Recall@K from 0.861 to 0.848. Subsampling features adds tree variance; `max_features=1.0` is retained as the default to ensure balanced detection across fraud archetypes simultaneously.
+   - Multiple fusion strategies supported: **Mean-Rank** ($0.50 \times \text{rank}_{\text{IF}} + 0.50 \times \text{rank}_{\text{TF}}$), **Max-Rank** ($\max(\text{rank}_{\text{IF}}, \text{rank}_{\text{TF}})$), **Tuned Weighted Fusion** ($0.80 \times \text{rank}_{\text{IF}} + 0.20 \times \text{rank}_{\text{TF, mean}}$), and **3-Signal Fusion** ($0.20 \times \text{rank}_{\text{IF}} + 0.10 \times \text{rank}_{\text{TF, mean}} + 0.70 \times \text{rank}_{\text{TF, win5}}$).
    - Entities with fewer than `min_seq_len` (default 3) events (143 with 1 tx + 131 with 2 txs = 274 addresses) are tagged with `insufficient_history=True` and scored via Isolation Forest alone.
 
 8. **Clustering Diagnostics & Subset Analysis**:
@@ -81,7 +82,7 @@ For detailed technical designs, refer to the dedicated documentation:
 
 10. **Multi-Page Reporting & API Services**:
     - Programmatically generates `risk_scores.csv`, a 6-panel visualization dashboard (`fraud_analysis_patterns.png`), and a detailed PDF risk dossier (`fraud_analysis_report.pdf`).
-    - Exposes complete real-time REST API with `/transactions/ingest`, `/risk/{entity_id}`, `/metrics`, and `/health`.
+    - Exposes real-time REST API with `/transactions/ingest`, `/risk/{entity_id}`, `/metrics`, and `/health`.
 
 ---
 
@@ -105,7 +106,23 @@ uv pip install -r requirements.txt
 
 ## Quickstart
 
-### 1. Launch the Real-Time Ingestion Service
+### 1. Run Offline Forensic Batch Pipeline
+
+Analyze a transaction CSV archive and output the complete risk dossier:
+
+```bash
+python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output
+```
+
+### 2. Run Synthetic Anomaly Benchmark
+
+Evaluate the models across 10 random seeds against 5 fraud archetypes:
+
+```bash
+python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output --benchmark
+```
+
+### 3. Launch the Real-Time Ingestion Service
 
 ```bash
 uvicorn decrypt.service.app:app --host 0.0.0.0 --port 8000 --reload
@@ -115,47 +132,32 @@ uvicorn decrypt.service.app:app --host 0.0.0.0 --port 8000 --reload
 - **Interactive OpenAPI UI**: `http://localhost:8000/docs`
 - **Telemetry Metrics**: `GET http://localhost:8000/metrics`
 
-### 2. Ingest a Transaction via REST
+### 4. Ingest a Transaction via REST
 
 ```bash
 curl -X POST http://localhost:8000/transactions/ingest \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: test_key" \
   -d '{
     "transaction_id": "tx_demo_001",
-    "source": "crypto_ethereum",
-    "network": "ethereum_mainnet",
-    "entity_id": "0x71C...b847",
+    "source": "crypto_bitcoin",
+    "network": "bitcoin_mainnet",
+    "entity_id": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
     "transaction_hash": "0xabc...123",
-    "timestamp": "2026-11-07T10:00:00Z",
+    "timestamp": "2013-05-01T10:00:00Z",
     "transaction_type": "deposit",
     "amount": "2.5",
-    "asset": "ETH"
+    "asset": "BTC"
   }'
 ```
 
-### 3. Evaluate Real-Time Entity Risk
+### 5. Evaluate Real-Time Entity Risk
 
 ```bash
-curl http://localhost:8000/risk/0x71C...b847
+curl -H "X-API-Key: test_key" http://localhost:8000/risk/1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa
 ```
 
-### 4. Run Offline Forensic Batch Pipeline
-
-Analyze a transaction CSV archive and output the complete risk dossier:
-
-```bash
-python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output
-```
-
-### 5. Run Synthetic Anomaly Benchmark
-
-Evaluate the models across 10 random seeds against 5 fraud archetypes:
-
-```bash
-python -m decrypt.main --data data/bitcoin_transactions.csv --outdir output --benchmark
-```
-
-### 3. CLI Arguments Reference
+### 6. CLI Arguments Reference
 
 | Flag | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -196,15 +198,21 @@ Execute the automated test suite with `pytest`:
 python -m pytest tests/
 ```
 
-Test coverage includes feature correctness (e.g. deposit 100 / withdraw 100, direction alternation dynamics), heuristic graph linkages, sequence tensor shapes, and an end-to-end smoke test on a 50-address sample.
+Test coverage includes feature correctness (e.g. deposit 100 / withdraw 100, direction alternation dynamics), feature parity between batch and incremental extractors across 20 real entities, heuristic graph linkages, sequence tensor shapes, and a complete smoke test on a 50-address sample.
 
 ---
 
-## Known Dataset Characteristics & Caveats
+## Known System Limitations & Dataset Characteristics
 
-1. **Absence of Ground-Truth Labels**: The provided dataset (`data/bitcoin_transactions.csv`) lacks fraud labels. Benchmark numbers are computed against realistic synthetic proxy archetypes; real addresses may contain undetected organic anomalies.
-2. **Heuristic Flow Graph (Negative Result)**: Raw Bitcoin transactions in this dataset consist of isolated address records rather than multi-input/multi-output transactions. Graph edges (137 edges) are heuristically inferred based on temporal proximity ($\le 24$h) and amount matching ($\le 2\%$). In permutation testing, shuffling timestamps produces a mean of 183.5 edges and shuffling amounts produces a mean of 154.5 edges. Because randomized null permutations produce *equal or more* edges than the real graph, and because an empirical ablation demonstrates that network features degrade Isolation Forest performance ($\Delta \text{AUROC} = -0.0208$, $\Delta \text{AP} = -0.0566$), the graph is formally classified as a **Negative Result** and excluded from scoring by default.
-3. **Short Histories Audit**: Exactly 274 addresses (42.41% of all 646 addresses) have fewer than 3 transactions (143 addresses with 1 transaction, 131 addresses with 2 transactions). These are flagged as `insufficient_history=True` and evaluated reliably via Isolation Forest without forcing sequence inference.
-4. **Empirical Temporal Patterns**: In the real dataset, **29 addresses (4.49%)** exhibit a deposit followed by a withdrawal within 15 minutes, and **61 addresses (9.44%)** have inter-event gaps under 60 seconds.
-5. **Clustering Diagnostics**: Tabular KMeans produces a cluster containing 98.14% of addresses (634/646) and an outlier cluster of 12 entities, triggering an automated cluster skew warning. HDBSCAN evaluated on the valid sequence history subset ($N=372$) yields 2 clusters (silhouette 0.0984, sizes: 339 and 7, 26 noise points), whereas KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.4180, sizes: 187 and 185).
-6. **Alternating Deposit/Withdraw Dynamics & Fund Conservation**: The Sequence Transformer achieves 1.000 recall across all delay variants for alternating deposit/withdraw patterns. With the addition of tabular direction features (`direction_switch_count`, `alternation_rate`, `max_alternating_run_length`), Fixed IF recall improves from 0.50 to 0.830 [0.760, 0.890], but does not fully match the Transformer (1.000). The model operates purely on discrete transition sequences and delta-t timings; it does *not verify fund conservation*. In validation controls (`output/validation_controls.json`), truncating sequences to 3–6 events drops Fixed IF recall to 0.200 while Transformer retains 0.910 recall. In in-situ contamination of real addresses ($\ge 5$ txs), injecting 2–3 alternating cycles yields 0.400 recall on Transformer vs 0.300–0.310 on Fixed IF.
+To maintain scientific and engineering integrity, the following platform limitations are explicitly documented (mirroring `CHANGES.md` Section 7):
+
+1. **Absence of Ground-Truth Labels**: The underlying Bitcoin dataset (`data/bitcoin_transactions.csv`) lacks verified forensic fraud labels. All supervised evaluation metrics (AUROC, AP, Recall@K) are measured exclusively against synthetic proxy injections. Real addresses labeled as "normal" in benchmarks may contain undetected historical fraud or mixer interactions.
+2. **Synthetic Anomaly Approximations**: The 5 fraud archetypes (Structuring, Bursts, Alternating Cycles, Bot-Periodic, Dormant-Spike) are generated using stylized mathematical distributions. Real-world adversaries employ dynamic evasion techniques (e.g. varying amount splits, non-uniform delays, decoy transactions) that may not match these templates.
+3. **Benchmark Circularity**: The tabular features introduced in v2.0 (`direction_switch_count`, `alternation_rate`, `cv_inter_event_time`, `modal_amount_share`, `lag1_autocorr_inter_event_time`) encode the mathematical definitions of the synthetic archetypes by construction. Their high benchmark scores reflect alignment with the generator rather than verified generalizability against unseen adversarial tactics.
+4. **Subtle In-Situ Contamination Ceiling ($k=1$ Recall $\sim 0.31$)**: When an adversary injects only a single alternating cycle ($k=1$, 2 transactions) into an established address history, all models achieve low recall ($\sim 0.31 - 0.35$). Paired bootstrap confidence intervals against Fixed IF span zero. Two isolated transactions are statistically indistinguishable from legitimate behavioral variance.
+5. **Training Domain & Temporal Calibration Bounds**: The pre-trained Transformer and baseline reference distributions were trained on early Bitcoin data (May 2011 to February 2014). The model is uncalibrated for modern DeFi protocols, Ethereum ERC-20 smart contracts, or fiat banking transactions. Scoring out-of-domain sources without fitting a dedicated empirical reference distribution triggers source-guard rejection.
+6. **Heuristic Flow Graph Negative Result**: Because public cryptocurrency transaction exports lack direct UTXO input-output linkage graphs, heuristic time-and-amount flow matching produces more edges on randomly shuffled data (154–183 edges) than on real data (137 edges). Inclusion of these network features actively degrades Isolation Forest Recall@K by -0.051. The graph is excluded from scoring by default.
+7. **Short Histories Audit**: Exactly 274 addresses (42.41% of all 646 addresses) have fewer than 3 transactions (143 addresses with 1 transaction, 131 addresses with 2 transactions). These are flagged as `insufficient_history=True` and evaluated via Isolation Forest without forcing sequence inference.
+8. **Empirical Temporal Patterns**: In the real dataset, **29 addresses (4.49%)** exhibit a deposit followed by a withdrawal within 15 minutes, and **61 addresses (9.44%)** have inter-event gaps under 60 seconds.
+9. **Clustering Diagnostics**: Tabular KMeans produces a cluster containing 98.14% of addresses (634/646) and an outlier cluster of 12 entities, triggering an automated cluster skew warning. HDBSCAN evaluated on the valid sequence history subset ($N=372$) yields 2 clusters (silhouette 0.1365, sizes: 290 and 7, 75 noise points), whereas KMeans on this subset yields balanced clusters ($k=2$, silhouette 0.3712, sizes: 180 and 192).
+10. **Alternating Deposit/Withdraw Dynamics & Fund Conservation**: The Sequence Transformer achieves 1.000 recall across all delay variants for alternating deposit/withdraw patterns. With the addition of tabular direction features (`direction_switch_count`, `alternation_rate`, `max_alternating_run_length`), Fixed IF recall improves from 0.50 to 0.830 [0.760, 0.890], but does not fully match the Transformer (1.000). The model operates purely on discrete transition sequences and delta-t timings; it does *not verify fund conservation*.

@@ -10,7 +10,7 @@ The platform ingests heterogeneous transaction streams from:
 3. **UTXO Blockchains (Bitcoin Esplora / Mempool.space)**: Wallet-level transaction decomposition from raw multi-input/multi-output UTXO blocks and unconfirmed mempools.
 4. **Legacy Batch Archives**: Five-column historical CSV transaction archives (`address_id`, `timestamp`, `transaction_type`, `amount`, `is_fraud`).
 
-The processing core pairs a **23-dimensional vectorized behavioral profiler** (Isolation Forest) with a **BERT-style Masked Event Transformer** (`EventTransformerModel`), delivering calibrated ensemble anomaly risk scores ($0.0 - 100.0$) alongside deterministic explanations (top anomalous features and top-3 surprising sequence events).
+The processing core pairs a **28-dimensional vectorized behavioral profiler** (Isolation Forest) with a **BERT-style Masked Event Transformer** (`EventTransformerModel`), delivering calibrated ensemble anomaly risk scores ($0.0 - 100.0$) alongside deterministic explanations (top anomalous features and top-3 surprising sequence events).
 
 ---
 
@@ -50,7 +50,7 @@ flowchart TD
 
     subgraph Real-Time ML Pipeline
         StateManager[EntityStateManager\n128-Event Sliding Window]
-        IncFeatures[IncrementalFeatureExtractor\n23 Vectorized Features]
+        IncFeatures[IncrementalFeatureExtractor\n28 Vectorized Features]
         IFModel[Isolation Forest Model]
         TFModel[Masked Event Transformer]
         Calibrator[Empirical Reference Calibrator\nResolves N=1 Rank Distortion]
@@ -164,7 +164,7 @@ sequenceDiagram
     
     par Async Risk Evaluation
         API->>ML: evaluate_entity(entity_id, recent_transactions)
-        ML->>ML: Extract 23 incremental behavioral features
+        ML->>ML: Extract 28 incremental behavioral features
         ML->>ML: Standardize & compute IF score
         ML->>ML: Forward pass on EventTransformerModel (NLL sequence surprise)
         ML->>ML: Calibrate against reference CDFs
@@ -187,32 +187,37 @@ DeCrypt solves this via **Empirical Reference CDF Calibration**:
    $$\text{rank}_{\text{TF}}(s) = \text{percentileofscore}(\mathcal{D}_{\text{TF\_ref}}, s, \text{kind}='weak')$$
 3. Calibrated ranks are bounded strictly within $[0.0, 100.0]$ and remain statistically consistent with batch results.
 
-### 5.2 Incremental Feature Extraction (23 Features)
-The `IncrementalFeatureExtractor` maintains an in-memory sliding window of the entity's last 128 transactions (`EntityStateManager`), computing the exact 23 features required by the Isolation Forest without requiring full-dataset SQL table scans:
+### 5.2 Incremental Feature Extraction (28 Features)
+The `IncrementalFeatureExtractor` maintains an in-memory sliding window of the entity's last 128 transactions (`EntityStateManager`), computing the exact 28 features required by the Isolation Forest without requiring full-dataset SQL table scans:
 
 1. `total_transactions`: Event count in history window.
 2. `total_volume`: Sum of absolute transaction amounts ($\sum |a_i|$).
 3. `net_flow`: Sum of signed transactions ($\sum a_i$).
-4. `avg_amount`: Arithmetic mean amount.
-5. `std_amount`: Standard deviation of amounts.
-6. `max_amount`: Peak transaction amount.
-7. `min_amount`: Minimum transaction amount.
-8. `deposit_count`: Inflow transaction count.
-9. `withdrawal_count`: Outflow transaction count.
-10. `deposit_ratio`: $\frac{\text{deposit\_count}}{\text{total\_transactions}}$.
-11. `pass_through_ratio`: $\min(\text{inflow}, \text{outflow}) / \max(\text{inflow}, \text{outflow})$.
-12. `burstiness`: Goh-Barabási coefficient $B = \frac{\sigma_{\Delta t} - \mu_{\Delta t}}{\sigma_{\Delta t} + \mu_{\Delta t}}$.
-13. `inactivity_days`: Days between window boundaries.
-14. `inter_event_cv`: Coefficient of variation of inter-event gaps ($\frac{\sigma_{\Delta t}}{\mu_{\Delta t}}$).
-15. `inter_event_autocorr`: Lag-1 autocorrelation of $\Delta t$.
-16. `modal_amount_share`: Fraction of events sharing the modal amount ($\frac{\text{count}(\text{mode})}{N}$).
-17. `shannon_amount_entropy`: Entropy of binned transaction amounts.
-18. `direction_switch_count`: Transitions where $\text{dir}_i \ne \text{dir}_{i-1}$.
-19. `alternation_rate`: $\frac{\text{direction\_switch\_count}}{N - 1}$.
-20. `max_alternating_run_length`: Longest sequence of alternating directions.
-21. `quick_turnaround_15m`: Deposits immediately followed by a withdrawal within 15 minutes.
-22. `rapid_succession_60s`: Consecutive transactions within 60 seconds.
-23. `history_span_days`: Elapsed duration of the entity's history window.
+4. `avg_transaction_size`: Mean absolute transaction amount.
+5. `max_transaction`: Maximum absolute transaction amount.
+6. `min_transaction`: Minimum absolute transaction amount.
+7. `transaction_variance`: Variance of absolute transaction amounts.
+8. `total_deposited`: Sum of positive inflow amounts.
+9. `total_withdrawn`: Sum of positive outflow amounts.
+10. `n_deposits`: Inflow transaction count.
+11. `n_withdrawals`: Outflow transaction count.
+12. `deposit_withdraw_ratio`: $\frac{n_{\text{deposits}}}{n_{\text{withdrawals}} + 1}$.
+13. `pass_through_ratio`: $\min(\text{inflow}, \text{outflow}) / \max(\text{inflow}, \text{outflow})$.
+14. `activity_period_days`: Total active span in days between first and last transaction.
+15. `activity_centroid`: Normalized temporal centroid (mean offset from first transaction divided by span).
+16. `burstiness`: Goh-Barabási coefficient $B = \frac{\sigma_{\Delta t} - \mu_{\Delta t}}{\sigma_{\Delta t} + \mu_{\Delta t}}$.
+17. `avg_time_between_txs`: Mean inter-event time ($\Delta t$) in seconds.
+18. `tx_time_variance`: Variance of inter-event time ($\Delta t$).
+19. `cv_inter_event_time`: Coefficient of variation of inter-event gaps ($\frac{\sigma_{\Delta t}}{\mu_{\Delta t}}$).
+20. `lag1_autocorr_inter_event_time`: Lag-1 autocorrelation of $\Delta t$.
+21. `modal_amount_share`: Fraction of transactions sharing the modal amount ($\frac{\text{count}(\text{mode})}{\text{total txs}}$).
+22. `amount_entropy`: Shannon entropy of binned transaction amounts.
+23. `large_transaction_ratio`: Fraction of transactions exceeding $3\times$ entity mean amount.
+24. `weekend_ratio`: Fraction of transactions occurring on Saturday or Sunday.
+25. `unique_interactions`: Number of unique interaction records (1.0 default for address-only feeds).
+26. `direction_switch_count`: Count of consecutive event pairs with opposite direction ($\text{dir}_i \ne \text{dir}_{i-1}$).
+27. `alternation_rate`: Direction switch count divided by $(N - 1)$.
+28. `max_alternating_run_length`: Longest consecutive run of alternating direction transitions.
 
 ### 5.3 Sequence Modeling & Surprise Inference
 For entities with $\ge 3$ transactions:
