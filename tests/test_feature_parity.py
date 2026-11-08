@@ -77,6 +77,7 @@ def test_batch_vs_incremental_feature_parity_20_real_entities():
                         f"inc={inc_val:.6f} vs batch={batch_val:.6f}"
                     )
 
+    print(f"\nFeature parity verified: {len(selected_entities)} entities x {len(inc_features)} features = {comparisons_count} comparisons actually made (0 mismatches).")
     assert len(mismatches) == 0, f"Found {len(mismatches)} feature parity mismatches:\n" + "\n".join(mismatches[:10])
-    # 20 entities * ~29 features = ~580 comparisons
-    assert comparisons_count >= 500
+    # 20 entities * 28 features = 560 comparisons actually made
+    assert comparisons_count == 560

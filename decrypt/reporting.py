@@ -191,7 +191,7 @@ def generate_pdf_report(
     elements.append(Paragraph("1. Methodology & Architecture Overview", h1_style))
     method_text = (
         "<b>DeCrypt</b> employs a multi-view anomaly detection architecture designed for financial and cryptocurrency transactions: "
-        "<br/>• <b>Vectorized Behavioral Profiling:</b> Extracts net flow, pass-through ratio, Goh-Barabási burstiness, and Shannon amount entropy. "
+        "<br/>• <b>Vectorized Behavioral Profiling:</b> Extracts net flow, pass-through ratio, Goh-Barabási burstiness, and Shannon amount entropy across 28 tabular features (verified in parity testing across 20 real entities: 20 entities × 28 features = 560 comparisons actually made with 0 mismatches). "
         "<br/>• <b>Heuristic Flow Graph:</b> Traces temporal fund movements between withdrawals and matching deposits within a configurable window (24h, 2% tolerance). "
         "<br/>• <b>BERT-Style Masked Event Transformer:</b> 2-layer Transformer encoder trained with 15% masked event modeling over direction, binned amounts, and inter-arrival intervals. Anomaly score represents leave-one-out event surprise (NLL). Detects alternating deposit/withdraw dynamics and timing transitions; note that the model does not verify fund conservation. "
         "<br/>• <b>Fusion Strategies:</b> Evaluates Mean-Rank (0.5/0.5), Max-Rank, and Tuned-Weight (0.8 IF / 0.2 TF) percentile rank fusion. "

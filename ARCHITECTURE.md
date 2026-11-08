@@ -188,7 +188,7 @@ DeCrypt solves this via **Empirical Reference CDF Calibration**:
 3. Calibrated ranks are bounded strictly within $[0.0, 100.0]$ and remain statistically consistent with batch results.
 
 ### 5.2 Incremental Feature Extraction (28 Features)
-The `IncrementalFeatureExtractor` maintains an in-memory sliding window of the entity's last 128 transactions (`EntityStateManager`), computing the exact 28 features required by the Isolation Forest without requiring full-dataset SQL table scans:
+The `IncrementalFeatureExtractor` maintains an in-memory sliding window of the entity's last 128 transactions (`EntityStateManager`), computing the exact 28 features required by the Isolation Forest without requiring full-dataset SQL table scans. Full mathematical parity between batch and incremental extraction is verified across 20 real entities (20 entities × 28 features = 560 comparisons actually made with 0 mismatches in `tests/test_feature_parity.py`):
 
 1. `total_transactions`: Event count in history window.
 2. `total_volume`: Sum of absolute transaction amounts ($\sum |a_i|$).
