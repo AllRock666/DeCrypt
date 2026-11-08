@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 import pandas as pd
@@ -92,6 +93,23 @@ def main():
         if config.benchmark:
             logger.info("Executing Benchmark Suite...")
             benchmark_data = run_benchmark(df, outdir, config)
+        else:
+            cons_bench = outdir / 'consolidated_v1_1_benchmark.json'
+            reg_bench = outdir / 'benchmark_results.json'
+            if cons_bench.exists():
+                try:
+                    with open(cons_bench, 'r', encoding='utf-8') as f:
+                        benchmark_data = json.load(f)
+                    logger.info("Loaded benchmark data from %s", cons_bench)
+                except Exception as e:
+                    logger.warning("Could not load benchmark data from %s: %s", cons_bench, e)
+            elif reg_bench.exists():
+                try:
+                    with open(reg_bench, 'r', encoding='utf-8') as f:
+                        benchmark_data = json.load(f)
+                    logger.info("Loaded benchmark data from %s", reg_bench)
+                except Exception as e:
+                    logger.warning("Could not load benchmark data from %s: %s", reg_bench, e)
             
         # 2. Extract Features (Behavioral + Heuristic Graph or Legacy)
         features, G = extract_all_features(df, config)

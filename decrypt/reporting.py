@@ -295,18 +295,23 @@ def generate_pdf_report(
     elements.append(Spacer(1, 12))
     
     # 4. Benchmark Results Table with 95% Bootstrap CIs
-    if benchmark_data and 'summary' in benchmark_data:
+    if benchmark_data and ('summary' in benchmark_data or 'models' in benchmark_data):
         elements.append(Paragraph("4. Benchmark Evaluation (10 Seeds, 100 Injections/Seed, 95% Bootstrap CI)", h1_style))
-        b_summary = benchmark_data['summary']
+        elements.append(Paragraph(
+            "<b>Batch Default Evaluation:</b> Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes.",
+            normal_style
+        ))
+        elements.append(Spacer(1, 4))
+        b_summary = benchmark_data.get('models', benchmark_data.get('summary', {}))
         b_rows = [
             ['Model', 'AUROC [95% CI]', 'AP [95% CI]', 'Recall@K', 'Struct', 'Burst', 'Alt Dep/Wd', 'Periodic', 'Spike']
         ]
         for m_name, vals in b_summary.items():
             b_rows.append([
                 Paragraph(f"<b>{m_name}</b>", cell_style),
-                Paragraph(f"{vals['auroc']['mean']:.3f}<br/>[{vals['auroc']['ci_lower']:.2f},{vals['auroc']['ci_upper']:.2f}]", cell_style),
-                Paragraph(f"{vals['ap']['mean']:.3f}<br/>[{vals['ap']['ci_lower']:.2f},{vals['ap']['ci_upper']:.2f}]", cell_style),
-                Paragraph(f"{vals['recall_at_k']['mean']:.3f}<br/>[{vals['recall_at_k']['ci_lower']:.2f},{vals['recall_at_k']['ci_upper']:.2f}]", cell_style),
+                Paragraph(f"{vals['auroc']['mean']:.3f}<br/>[{vals['auroc']['ci_lower']:.3f},{vals['auroc']['ci_upper']:.3f}]", cell_style),
+                Paragraph(f"{vals['ap']['mean']:.3f}<br/>[{vals['ap']['ci_lower']:.3f},{vals['ap']['ci_upper']:.3f}]", cell_style),
+                Paragraph(f"{vals['recall_at_k']['mean']:.3f}<br/>[{vals['recall_at_k']['ci_lower']:.3f},{vals['recall_at_k']['ci_upper']:.3f}]", cell_style),
                 Paragraph(f"{vals['archetype_recalls']['structuring']['mean']:.2f}", cell_style),
                 Paragraph(f"{vals['archetype_recalls']['burst']['mean']:.2f}", cell_style),
                 Paragraph(f"{vals['archetype_recalls']['pass_through']['mean']:.2f}", cell_style),
@@ -327,25 +332,34 @@ def generate_pdf_report(
         elements.append(t_bench)
         elements.append(Spacer(1, 8))
         
-        # Paired Bootstrap Differences Table (Tuned Fusion vs Fixed IF)
+        # Paired Bootstrap Differences Table (Batch / Tuned Fusion vs Fixed IF)
         paired = benchmark_data.get('paired_differences_tuned_vs_fixed_if', {})
+        if not paired and 'paired_vs_if' in benchmark_data:
+            paired = benchmark_data['paired_vs_if'].get(
+                'Batch Fusion (0.8/0.2 Mean)',
+                benchmark_data['paired_vs_if'].get('Tuned Fusion (0.8/0.2)', {})
+            )
         if paired:
-            elements.append(Paragraph("<b>Paired Bootstrap CI of the Difference: Tuned Fusion vs Fixed IF</b>", h2_style))
+            elements.append(Paragraph("<b>Paired Bootstrap CI of the Difference: Batch Fusion (0.8/0.2 Mean) vs Fixed IF</b>", h2_style))
             p_rows = [
                 ['Metric', 'Paired Mean Difference', '95% Bootstrap CI', 'Statistical Interpretation']
             ]
             for metric, label in [('auroc', 'Δ AUROC'), ('ap', 'Δ Average Precision (AP)'), ('recall_at_k', 'Δ Recall@K')]:
+                if metric not in paired:
+                    continue
                 d = paired[metric]
-                if d['ci_lower'] > 0:
-                    interp = "95% bootstrap CI excludes zero"
-                elif d['ci_lower'] == 0 or d['ci_upper'] == 0:
+                ci_low_str = f"{d['ci_lower']:+.3f}"
+                ci_upp_str = f"{d['ci_upper']:+.3f}"
+                if abs(d['ci_lower']) <= 1e-4 or abs(d['ci_upper']) <= 1e-4 or ci_low_str in ['+0.000', '-0.000', '0.000']:
                     interp = "Borderline (touches zero)"
+                elif d['ci_lower'] > 0:
+                    interp = "95% bootstrap CI excludes zero"
                 else:
                     interp = "Overlap with zero"
                 p_rows.append([
                     Paragraph(f"<b>{label}</b>", cell_style),
                     Paragraph(f"{d['mean']:+.4f}", cell_style),
-                    Paragraph(f"[{d['ci_lower']:+.4f}, {d['ci_upper']:+.4f}]", cell_style),
+                    Paragraph(f"[{ci_low_str}, {ci_upp_str}]", cell_style),
                     Paragraph(interp, cell_style)
                 ])
             t_pair = Table(p_rows, colWidths=[1.8*inch, 1.6*inch, 1.8*inch, 2.0*inch])

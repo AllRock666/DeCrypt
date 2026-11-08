@@ -49,7 +49,7 @@ Paired differences $\Delta = \text{Model} - \text{Fixed IF}$ evaluated across al
 
 | Model | $\Delta$ AUROC [95% CI] | $\Delta$ AP [95% CI] | $\Delta$ Recall@K [95% CI] | Key Archetype Shifts |
 | :--- | :---: | :---: | :---: | :--- |
-| **Batch Fusion (0.8/0.2 Mean)** | **+0.0046 [+0.0020, +0.0072]** | **+0.0276 [+0.0151, +0.0394]** | **+0.0130 [+0.0000, +0.0240]** | Alternating: **+0.200 [+0.140, +0.255]**; Structuring: +0.025; Burst: -0.075 |
+| **Batch Fusion (0.8/0.2 Mean)** | **+0.0046 [+0.0020, +0.0072]** | **+0.0276 [+0.0151, +0.0394]** | **+0.0130 [+0.0000, +0.0240]** (Borderline) | Alternating: **+0.200 [+0.140, +0.255]**; Structuring: +0.025; Burst: -0.075 |
 | **Streaming Fusion (3-Signal)** [**Experimental**] | **-0.0976 [-0.1147, -0.0817]** | **-0.1246 [-0.1489, -0.1010]** | **-0.1970 [-0.2310, -0.1670]** | Burst: **-0.525**; Bot-Periodic: **-0.475**; Structuring: **-0.210**; Alternating: +0.240 |
 
 ### 3.2 Paired Differences vs. Batch Fusion (0.8/0.2 Mean)
@@ -63,7 +63,7 @@ Paired differences $\Delta = \text{Model} - \text{Batch Fusion}$ on the whole-ad
 * **The Noise Threshold vs. Drop Magnitude**: The run-to-run random seed noise level is approximately **~0.01–0.03**. The observed drops in 3-signal fusion (-0.102 AUROC, -0.152 AP, -0.210 Recall@K) exceed the noise level by **over 5x to 10x**.
 * **Mechanistic Cause**: In 3-signal fusion, 70% weight is allocated to localized Window-5 max surprise, and only 20% to Isolation Forest. Whole-address anomalies exhibit diffuse behavioral signatures across the entity's complete lifespan (high burst count, total structuring turnover, strict inter-arrival time regularity). The localized 5-event window captures local transition surprise but completely loses the macroscopic count/volume distributions that tabular Isolation Forest isolates.
 * **Architectural Resolution**: Because 3-Signal severely impairs whole-address detection, it **cannot be the global default**. Instead, we introduce `--profile batch|streaming`:
-  - `batch` (**Default**): 0.8 IF + 0.2 TF Mean surprise. Effectively balances tabular volume/count signatures with sequence surprise across all 5 fraud archetypes.
+  - `batch` (**Default**): 0.8 IF + 0.2 TF Mean surprise. Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes.
   - `streaming` (**Experimental**): 3-Signal ($0.20 \text{ IF} + 0.10 \text{ Mean} + 0.70 \text{ Window-5}$). Applied in real-time streaming where local burstiness must be captured amidst long benign histories.
 
 ---
@@ -217,8 +217,8 @@ Evaluated across 10 held-out evaluation seeds (42–51) on real addresses with $
 | Stratum | Fixed IF Recall@K | Batch Fusion Recall@K | Diff (Batch vs IF) | Streaming Fusion Recall@K | Diff (Streaming vs IF) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Overall ($\ge 5$)** | 0.594 [0.512, 0.671] | **0.659 [0.571, 0.735]** | **+0.065 [+0.012, +0.118]** | 0.629 [0.541, 0.718] | +0.035 [-0.071, +0.141] |
-| **5–9 events** | 0.567 [0.400, 0.733] | **0.733 [0.600, 0.867]** | **+0.167 [+0.050, +0.300]** | **0.783 [0.633, 0.917]** | **+0.217 [+0.000, +0.433]** |
-| **10–24 events** | 0.667 [0.533, 0.817] | 0.700 [0.550, 0.833] | +0.033 [+0.000, +0.100] | 0.717 [0.583, 0.833] | +0.050 [-0.133, +0.233] |
+| **5–9 events** | 0.567 [0.400, 0.733] | **0.733 [0.600, 0.867]** | **+0.167 [+0.050, +0.300]** | **0.783 [0.633, 0.917]** | **+0.217 [+0.000, +0.433]** (Borderline) |
+| **10–24 events** | 0.667 [0.533, 0.817] | 0.700 [0.550, 0.833] | +0.033 [+0.000, +0.100] (Borderline) | 0.717 [0.583, 0.833] | +0.050 [-0.133, +0.233] |
 | **25+ events** | 0.520 [0.320, 0.700] | 0.580 [0.400, 0.760] | +0.060 [-0.100, +0.260] | 0.620 [0.480, 0.760] | +0.100 [-0.120, +0.320] |
 
 #### Archetype C: Embedded Bot-Periodic (15–25 transactions with identical interval and amount)
@@ -235,15 +235,15 @@ Evaluated across 10 held-out evaluation seeds (42–51) on real addresses with $
 | Stratum | Fixed IF Recall@K | Batch Fusion Recall@K | Diff (Batch vs IF) | Streaming Fusion Recall@K | Diff (Streaming vs IF) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Overall ($\ge 5$)** | 0.276 [0.194, 0.365] | 0.312 [0.224, 0.412] | +0.035 [-0.024, +0.100] | **0.388 [0.288, 0.488]** | **+0.112 [+0.006, +0.218]** |
-| **5–9 events** | 0.217 [0.100, 0.350] | 0.267 [0.133, 0.433] | +0.050 [+0.000, +0.150] | 0.400 [0.233, 0.567] | +0.183 [-0.017, +0.417] |
-| **10–24 events** | 0.250 [0.100, 0.417] | 0.267 [0.117, 0.433] | +0.017 [+0.000, +0.067] | 0.350 [0.217, 0.500] | +0.100 [-0.083, +0.267] |
+| **5–9 events** | 0.217 [0.100, 0.350] | 0.267 [0.133, 0.433] | +0.050 [+0.000, +0.150] (Borderline) | 0.400 [0.233, 0.567] | +0.183 [-0.017, +0.417] |
+| **10–24 events** | 0.250 [0.100, 0.417] | 0.267 [0.117, 0.433] | +0.017 [+0.000, +0.067] (Borderline) | 0.350 [0.217, 0.500] | +0.100 [-0.083, +0.267] |
 | **25+ events** | 0.300 [0.140, 0.460] | 0.340 [0.180, 0.520] | +0.040 [-0.120, +0.180] | 0.460 [0.280, 0.640] | +0.160 [-0.040, +0.360] |
 
 ##### Injected Alternating Cycles $k = 2$ (4 events)
 | Stratum | Fixed IF Recall@K | Batch Fusion Recall@K | Diff (Batch vs IF) | Streaming Fusion Recall@K | Diff (Streaming vs IF) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Overall ($\ge 5$)** | 0.300 [0.218, 0.388] | **0.412 [0.329, 0.512]** | **+0.112 [+0.053, +0.182]** | **0.547 [0.429, 0.671]** | **+0.247 [+0.135, +0.353]** |
-| **5–9 events** | 0.350 [0.217, 0.500] | 0.400 [0.267, 0.567] | +0.050 [+0.000, +0.133] | **0.683 [0.483, 0.850]** | **+0.333 [+0.167, +0.500]** |
+| **5–9 events** | 0.350 [0.217, 0.500] | 0.400 [0.267, 0.567] | +0.050 [+0.000, +0.133] (Borderline) | **0.683 [0.483, 0.850]** | **+0.333 [+0.167, +0.500]** |
 | **10–24 events** | 0.383 [0.233, 0.550] | 0.450 [0.267, 0.633] | +0.067 [-0.050, +0.183] | 0.533 [0.383, 0.684] | +0.150 [-0.050, +0.333] |
 | **25+ events** | 0.340 [0.180, 0.500] | 0.360 [0.200, 0.520] | +0.020 [-0.120, +0.160] | 0.520 [0.340, 0.680] | +0.180 [-0.020, +0.380] |
 
@@ -253,13 +253,13 @@ Evaluated across 10 held-out evaluation seeds (42–51) on real addresses with $
 | **Overall ($\ge 5$)** | 0.429 [0.353, 0.506] | **0.518 [0.429, 0.606]** | **+0.088 [+0.006, +0.171]** | **0.659 [0.553, 0.759]** | **+0.229 [+0.112, +0.341]** |
 | **5–9 events** | 0.467 [0.317, 0.617] | **0.583 [0.450, 0.717]** | **+0.117 [+0.033, +0.233]** | **0.800 [0.683, 0.900]** | **+0.333 [+0.167, +0.483]** |
 | **10–24 events** | 0.483 [0.333, 0.650] | 0.533 [0.383, 0.683] | +0.050 [-0.033, +0.150] | **0.733 [0.600, 0.867]** | **+0.250 [+0.067, +0.417]** |
-| **25+ events** | 0.360 [0.180, 0.540] | 0.380 [0.220, 0.540] | +0.020 [-0.120, +0.180] | **0.600 [0.440, 0.740]** | **+0.240 [+0.000, +0.460]** |
+| **25+ events** | 0.360 [0.180, 0.540] | 0.380 [0.220, 0.540] | +0.020 [-0.120, +0.180] | **0.600 [0.440, 0.740]** | **+0.240 [+0.000, +0.460]** (Borderline) |
 
 ### 5.4 Key Takeaways across Embedded Archetypes
 1. **Structuring Benefit**: On embedded structuring, Batch Fusion provides a statistically significant recall lift (+0.065 overall, +0.167 on short histories, 95% bootstrap CI excludes zero). Sequence modeling recognizes repeated directional deposits without corresponding withdrawals as unusual sequential progressions.
 2. **Burst Resistance**: On embedded bursts, tabular Fixed IF (0.688) and Batch Fusion (0.682) perform comparably ($\Delta = -0.006$). In contrast, Streaming Fusion degrades to 0.553 (-0.135 drop, 95% CI excludes zero) because down-weighting tabular features impairs the detection of rapid volume accumulations.
 3. **Alternating Cycles Lift**: Streaming Fusion excels on alternating deposit/withdrawal cycles, delivering +0.112 (at $k=1$), +0.247 (at $k=2$), and +0.229 (at $k=3$) overall lift over Fixed IF. On long histories (25+ events) where tabular averages dilute the alternation signature, Streaming Fusion achieves 0.600 vs. Fixed IF 0.360 (+0.240 lift).
-4. **Conclusion on Operational Profile**: Batch Fusion remains the recommended production default (`--profile batch`), achieving the best overall balance across all whole-address and embedded archetypes. Streaming Fusion is designated **(Experimental)** (`--profile streaming`), specifically suited for real-time streaming pipelines monitoring high-activity entities for localized micro-bursts and rapid reversals.
+4. **Conclusion on Operational Profile**: Batch Fusion remains the recommended production default (`--profile batch`). Highest point estimates on aggregate metrics (AUROC and AP paired CIs vs Fixed IF exclude zero; Recall@K borderline); weaker than Fixed IF on burst and bot-periodic archetypes. Streaming Fusion is designated **(Experimental)** (`--profile streaming`), specifically suited for real-time streaming pipelines monitoring high-activity entities for localized micro-bursts and rapid reversals.
 
 ---
 

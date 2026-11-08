@@ -199,3 +199,68 @@ def test_inject_embedded_archetypes():
     dts = inj_bot['timestamp'].diff().dropna().dt.total_seconds()
     assert np.allclose(dts, 300.0)
     assert (inj_bot['amount'].abs() == 25.0).all()
+
+def test_embedded_injectors_preservation_ordering_and_ranges():
+    """
+    Tests that embedded burst, structuring, and bot-periodic injectors satisfy:
+    1. Timestamps strictly ascending across the combined history.
+    2. All injected timestamps strictly after the original address history.
+    3. Original address events are strictly preserved without modification.
+    4. Injected event counts match documented ranges under default sampling:
+       - burst: 20-30 events
+       - structuring: 8-12 deposits + 1 consolidated withdrawal (9-13 total)
+       - bot-periodic: 15-25 events with constant interval and constant amount.
+    """
+    df_addr = pd.DataFrame({
+        'address_id': ['1AddrEmbeddedTest'] * 6,
+        'hash': [f'tx_{i}' for i in range(6)],
+        'timestamp': pd.to_datetime([
+            '2022-05-01 08:00:00',
+            '2022-05-02 09:30:00',
+            '2022-05-03 14:15:00',
+            '2022-05-05 11:00:00',
+            '2022-05-08 16:45:00',
+            '2022-05-10 12:00:00',
+        ]),
+        'type': [1, 1, -1, 1, -1, 1],
+        'amount': [15.5, 42.0, -10.0, 5.0, -4.8, 100.0]
+    })
+    orig_len = len(df_addr)
+    orig_max_t = df_addr['timestamp'].max()
+
+    for s in range(42, 52):
+        # 1. Burst Injector (default n_txs=None -> 20 to 30 transactions)
+        res_burst = inject_burst(df_addr, seed=s)
+        pd.testing.assert_frame_equal(res_burst.iloc[:orig_len].reset_index(drop=True), df_addr.reset_index(drop=True), check_dtype=False)
+        assert res_burst['timestamp'].is_monotonic_increasing
+        inj_burst = res_burst.iloc[orig_len:].reset_index(drop=True)
+        assert inj_burst['timestamp'].min() > orig_max_t
+        assert 20 <= len(inj_burst) <= 30
+        diffs = inj_burst['timestamp'].diff().dropna().dt.total_seconds()
+        assert (diffs >= 5.0).all() and (diffs <= 30.0).all()
+
+        # 2. Structuring Injector (default n_deposits=None -> 8 to 12 deposits + 1 withdrawal = 9 to 13 events)
+        res_struct = inject_structuring(df_addr, seed=s)
+        pd.testing.assert_frame_equal(res_struct.iloc[:orig_len].reset_index(drop=True), df_addr.reset_index(drop=True), check_dtype=False)
+        assert res_struct['timestamp'].is_monotonic_increasing
+        inj_struct = res_struct.iloc[orig_len:].reset_index(drop=True)
+        assert inj_struct['timestamp'].min() > orig_max_t
+        assert 9 <= len(inj_struct) <= 13
+        n_deposits = len(inj_struct) - 1
+        assert 8 <= n_deposits <= 12
+        assert (inj_struct.iloc[:n_deposits]['type'] == 1).all()
+        assert inj_struct.iloc[-1]['type'] == -1
+        assert np.isclose(inj_struct.iloc[:n_deposits]['amount'].sum(), -inj_struct.iloc[-1]['amount'])
+
+        # 3. Bot-Periodic Injector (default n_txs=None -> 15 to 25 transactions)
+        res_bot = inject_bot_periodic(df_addr, seed=s)
+        pd.testing.assert_frame_equal(res_bot.iloc[:orig_len].reset_index(drop=True), df_addr.reset_index(drop=True), check_dtype=False)
+        assert res_bot['timestamp'].is_monotonic_increasing
+        inj_bot = res_bot.iloc[orig_len:].reset_index(drop=True)
+        assert inj_bot['timestamp'].min() > orig_max_t
+        assert 15 <= len(inj_bot) <= 25
+        dts = inj_bot['timestamp'].diff().dropna().dt.total_seconds().values
+        assert np.allclose(dts, dts[0])
+        amts = inj_bot['amount'].abs().values
+        assert np.allclose(amts, amts[0])
+
